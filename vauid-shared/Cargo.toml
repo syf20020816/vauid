@@ -1,0 +1,11 @@
+[package]
+name = "vauid-shared"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+
+thiserror = "2.0.18"
+toml = "1.1.2"
