@@ -3,6 +3,7 @@ members=[
     "vauid", # vauid server
     "vauid-shared"
 ]
+resolver = "3"
 
 
 [workspace.dependencies]

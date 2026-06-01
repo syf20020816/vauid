@@ -1,0 +1,3 @@
+[env]
+CC_aarch64_apple_darwin = "clang"
+CXX_aarch64_apple_darwin = "clang++"
