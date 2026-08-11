@@ -3,8 +3,8 @@
 
 ## 1. 项目概述
 `vauid` 是一个基于 Rust 构建的下一代 WebRTC 媒体与信令服务器。其核心设计理念是 **“按需拓扑，极致效率”**：
-1. **默认 P2P 直连**：在小型会议（≤5人）中，强制客户端建立点对点 (Mesh) 连接，媒体流完全绕过服务器，实现零服务器带宽成本与最低延迟。
-2. **智能降级 SFU**：当房间人数 > 5 时，自动触发拓扑重构，平滑切换至 SFU (Selective Forwarding Unit) 模式，由 `vauid` 接管媒体流转发，防止客户端上行带宽崩溃。
+1. **默认 P2P 直连**：在小型会议（≤4人）中，强制客户端建立点对点 (Mesh) 连接，媒体流完全绕过服务器，实现零服务器带宽成本与最低延迟。
+2. **智能降级 SFU**：当房间人数 > 4 时，自动触发拓扑重构，平滑切换至 SFU (Selective Forwarding Unit) 模式，由 `vauid` 接管媒体流转发，防止客户端上行带宽崩溃。
 3. **QUIC 协议探索**：突破传统 WebRTC (RTP/SCTP over UDP) 的限制，探索基于 QUIC (通过 WebTransport 或自定义隧道) 构建更可靠、抗弱网的数据通道与信令链路，解决传统 UDP 的队头阻塞和穿透难题。
 
 ---
@@ -44,7 +44,7 @@ graph TD
         S3[Media Plane: SFU Engine<br/>str0m + Quinn]
     end
 
-    %% P2P Phase (<= 5 users)
+    %% P2P Phase (<= 4 users)
     C1 <-->|Direct P2P Media| C2
     C2 <-->|Direct P2P Media| C3
     C3 <-->|Direct P2P Media| C4
@@ -53,7 +53,7 @@ graph TD
     C1 -.->|WebSocket/QUIC Signaling| S1
     C2 -.->|WebSocket/QUIC Signaling| S1
     
-    %% SFU Phase (> 5 users)
+    %% SFU Phase (> 4 users)
     C5 ==>|SRTP/WebTransport Media| S3
     C6 ==>|SRTP/WebTransport Media| S3
     S3 ==>|Forwarded Media| C1
@@ -67,9 +67,9 @@ graph TD
 1. **信令与控制平面 (Control Plane)**：
    - 管理房间生命周期、用户加入/离开。
    - 维护当前房间人数计数器。
-   - **拓扑决策引擎**：当 `count > 5` 时，广播 `TOPOLOGY_SWITCH` 事件，触发客户端与服务器之间的 SDP 重协商 (Renegotiation)。
+   - **拓扑决策引擎**：当 `count > 4` 时，广播 `TOPOLOGY_SWITCH` 事件，触发客户端与服务器之间的 SDP 重协商 (Renegotiation)。
 2. **P2P 协调模块 (P2P Coordinator)**：
-   - 在 ≤5 人时，服务器仅作为“介绍人”。交换 ICE Candidates 和 SDP Offer/Answer。
+   - 在 ≤4 人时，服务器仅作为“介绍人”。交换 ICE Candidates 和 SDP Offer/Answer。
    - 媒体流**完全不经过**服务器，服务器带宽占用为 0。
 3. **SFU 媒体路由模块 (SFU Engine)**：
    - 当触发降级时，动态初始化 `str0m` 实例。
@@ -104,7 +104,7 @@ graph TD
 
 | 维度 | 传统 P2P (Mesh) | 传统纯 SFU (如 Janus, Mediasoup) | **`vauid` 混合架构** |
 | :--- | :--- | :--- | :--- |
-| **服务器带宽成本** | 极低 (仅信令) | 极高 (N 进 N 出转发) | **智能优化** (≤5人零带宽，>5人按需转发) |
+| **服务器带宽成本** | 极低 (仅信令) | 极高 (N 进 N 出转发) | **智能优化** (≤4人零带宽，>4人按需转发) |
 | **客户端上行压力** | 极高 (N-1 路编码与上传) | 极低 (仅 1 路上行) | **动态适应** (小房间无压力，大房间自动保护) |
 | **延迟** | 最低 (点对点) | 略高 (增加一跳服务器中转) | **自适应** (小房间极致低延迟，大房间保证流畅) |
 | **NAT 穿透成功率** | 依赖复杂网络，失败率高 | 高 (客户端只需连服务器) | **高** (小房间尽力 P2P，失败或人多时自动 fallback 到 SFU) |
@@ -123,15 +123,15 @@ graph TD
    │                                      │
    │                                      ├── (2) Read/Write ──> [Redis: Room State]
    │                                      │
-   │                                      ├── (3) If count <= 5: Exchange SDP/ICE ──> [Other Clients] (P2P)
+   │                                      ├── (3) If count <= 4: Exchange SDP/ICE ──> [Other Clients] (P2P)
    │                                      │
-   │                                      └── (4) If count > 5: Command Switch ──> [vauid: str0m SFU]
+   │                                      └── (4) If count > 4: Command Switch ──> [vauid: str0m SFU]
    │                                                              │
    └── (5) SRTP / WebTransport Media ────────────────────────────┘
 ```
 
 ### 6.2 拓扑切换时序 (The "Magic" Switch)
-1. **T0**: 房间内有 5 人，处于 P2P Mesh 状态。
+1. **T0**: 房间内有 4 人，处于 P2P Mesh 状态。
 2. **T1**: Client 6 发起 Join 请求。
 3. **T2**: `vauid` 信令模块检测到 `room.count == 6`，触发阈值。
 4. **T3**: `vauid` 向所有 6 个客户端广播 `{"event": "TOPOLOGY_CHANGE", "mode": "SFU", "sfu_endpoint": "wss://vauid-server/room/xyz"}`。
@@ -157,7 +157,7 @@ graph TD
 
 ## 8. 下一步研发路线图 (Roadmap)
 
-- **Phase 1 (MVP)**: 实现基于 `axum` + `str0m` 的基础 SFU 功能，以及 ≤5 人的纯 P2P 信令交换逻辑。
+- **Phase 1 (MVP)**: 实现基于 `axum` + `str0m` 的基础 SFU 功能，以及 ≤4 人的纯 P2P 信令交换逻辑。
 - **Phase 2 (核心)**: 实现 P2P 到 SFU 的自动检测与平滑重协商 (Renegotiation) 逻辑。
 - **Phase 3 (前沿)**: 引入 `quinn`，实现基于 QUIC 的信令通道和 DataChannel，替换现有 WebSocket/SCTP。
 - **Phase 4 (生态)**: 提供与您的前端“虚拟布局组件库”深度绑定的 SDK，开箱即用，提供完整的端到端解决方案。
@@ -179,7 +179,7 @@ graph TD
 
 | 阶段 | 状态名称 | Server (`vauid`) 行为 | Client (前端 + WebRTC) 行为 |
 | :--- | :--- | :--- | :--- |
-| **Phase 1** | **Preparation (准备)** | 检测到人数即将 > 5。广播 `PREPARE_SWITCH` 信令。 | 1. 预创建指向 Server 的 `RTCRtpTransceiver` (接收方向)。<br>2. 建立 ICE/DTLS，但**不附加到 DOM**，不渲染，处于 Standby 状态。 |
+| **Phase 1** | **Preparation (准备)** | 检测到人数即将 > 4。广播 `PREPARE_SWITCH` 信令。 | 1. 预创建指向 Server 的 `RTCRtpTransceiver` (接收方向)。<br>2. 建立 ICE/DTLS，但**不附加到 DOM**，不渲染，处于 Standby 状态。 |
 | **Phase 2** | **Overlap (双轨重叠)** | 新用户加入。Server 作为 SFU 开始接收所有人的流，并**立即向所有 Sender 请求关键帧 (PLI/FIR)**。Server 开始向所有 Receiver 转发 SFU 流。 | **Sender**: 开始**双发** (同时向 P2P  peers 和 SFU Server 发送媒体流)。<br>**Receiver**: 同时接收 P2P 流 (主) 和 SFU 流 (备用)。等待 SFU 流的首个关键帧。 |
 | **Phase 3** | **Acknowledgment (确认)** | 监听所有 Client 的 `SFU_READY` 信号。维护一个等待列表 (Pending List)。 | Receiver 成功解码 SFU 的首个关键帧后，向 Server 发送 `{"event": "SFU_READY", "sfu_track_id": "xxx"}`。 |
 | **Phase 4** | **Switchover (无缝切换)** | 当 Pending List 为空（或达到超时阈值），广播 `EXECUTE_SWITCH` 信令。 | **前端执行魔法**：<br>1. 克隆备用 SFU 的 `<video>` 节点。<br>2. 将其绝对定位覆盖在原 P2P `<video>` 节点上。<br>3. 原 P2P 节点 `opacity: 0`，SFU 节点 `opacity: 1` (配合 CSS transition)。<br>4. 切换 `<audio>` 源的 `setSinkId` 或直接替换 track。 |
