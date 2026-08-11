@@ -7,15 +7,15 @@
 //! 因此 `P2PServer` 不做跨线程共享；单连接处理建议在独立任务中独占运行。
 
 use std::net::SocketAddr;
+use std::path::Path;
 use std::rc::Rc;
 use std::time::Instant;
 
 use tquic::{Connection, Endpoint, PacketInfo, TransportHandler};
-use vauid_shared::conf::QuicConf;
 use vauid_shared::error::{Error, QuicError};
 
 use crate::core::quic::socket::{QuicSocket, RecvFrom};
-use crate::core::quic::wrap::conf::QuicConfig;
+use crate::core::quic::wrap::conf::{QuicConfig, QUIC_CONF_PATH};
 use crate::core::Result;
 
 /// P2P 服务端
@@ -33,20 +33,20 @@ pub struct P2PServer {
 }
 
 impl P2PServer {
-    /// 使用默认 QUIC 常规配置在 `listen` 地址上启动 P2P 服务器。
+    /// 使用默认配置文件 `conf/quic.conf.toml` 在 `listen` 地址上启动 P2P 服务器。
     ///
-    /// 注意：服务器需要 TLS 证书，默认配置不含 `tls`，请使用
-    /// [`Self::bind_with_conf`] 提供包含证书的配置。
+    /// 配置文件不存在时会自动创建默认配置；服务器需要 TLS 证书，
+    /// 请编辑该文件补全 `tls` 的 `cert_file` / `key_file` 后调用。
     pub async fn bind(listen: SocketAddr) -> Result<Self> {
-        Self::bind_with_conf(listen, &QuicConf::default()).await
+        Self::bind_with_conf(listen, QUIC_CONF_PATH).await
     }
 
-    /// 使用常规化配置在 `listen` 地址上启动 P2P 服务器。
+    /// 使用指定配置文件在 `listen` 地址上启动 P2P 服务器。
     ///
-    /// 配置经 [`QuicConfig::server`] 包装转换为 tquic [`Config`]，
-    /// 因此要求 `conf.tls` 配置了 `cert_file` / `key_file`。
-    pub async fn bind_with_conf(listen: SocketAddr, conf: &QuicConf) -> Result<Self> {
-        let config = QuicConfig::server(conf)?.into_inner();
+    /// 配置经 [`QuicConfig::server`] 加载并转换为 tquic [`Config`]，
+    /// 因此要求配置文件中 `tls` 配置了 `cert_file` / `key_file`。
+    pub async fn bind_with_conf(listen: SocketAddr, path: impl AsRef<Path>) -> Result<Self> {
+        let config = QuicConfig::server(path)?.into_inner();
 
         let socket = Rc::new(QuicSocket::new(&listen).await?);
         let endpoint = Endpoint::new(

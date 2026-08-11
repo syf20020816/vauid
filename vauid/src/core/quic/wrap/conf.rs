@@ -1,7 +1,9 @@
 //! 对 tquic `Config` 的常规化配置包装
 //!
-//! 将 [`vauid_shared::conf::QuicConf`]（与具体 QUIC 实现解耦的通用配置）
-//! 转换为 tquic 的 [`tquic::Config`]，错误统一为 [`vauid_shared::error::Error`]。
+//! 职责划分：
+//! - [`QuicConf`]（来自 `vauid-shared` 抽象层）：配置文件加载（[`QuicConf::new`] 等）；
+//! - [`QuicConfig`]：接收配置文件路径，内部经 [`QuicConf::new`] 加载后转换为
+//!   tquic 的 [`tquic::Config`]。
 //!
 //! 单位换算约定：`QuicConf` 的时间字段以**秒**为单位（便于配置），
 //! tquic 内部以**毫秒**为单位，此处统一使用 `saturating_mul` 换算防止溢出。
@@ -9,45 +11,48 @@
 use std::path::Path;
 
 use tquic::{Config, CongestionControlAlgorithm, TlsConfig};
-use vauid_shared::conf::{CcAlgorithm, QuicConf, TlsConf};
 use vauid_shared::error::{Error, QuicError};
 
-/// tquic 配置包装：持有构建完成的 tquic [`Config`]
+/// 应用层常规配置类型与默认配置路径，从共享抽象层重新导出。
+///
+/// vauid 包内的业务模块统一从本包路径取用配置类型，
+/// 不直接依赖 `vauid-shared`；`QuicConfig` 负责将其转换为 tquic [`Config`]。
+pub use vauid_shared::conf::{CcAlgorithm, QuicConf, TlsConf, QUIC_CONF_PATH};
+
+/// tquic 配置包装：持有构建完成的 tquic [`Config`]。
+///
+/// 用法：直接传入配置文件路径，内部经 [`QuicConf::new`] 加载
+/// （文件不存在时自动创建默认配置），再构建 tquic 配置：
+/// `QuicConfig::server(QUIC_CONF_PATH)` / `QuicConfig::client(path)`。
 pub struct QuicConfig(pub Config);
 
 impl QuicConfig {
-    /// 从通用配置构建 tquic **服务器端** 配置。
+    /// 从配置文件构建 tquic **服务器端** 配置。
     ///
+    /// 经 [`QuicConf::new`] 加载配置（文件不存在时自动创建默认配置）；
     /// 要求 `QuicConf::tls` 存在且配置了 `cert_file` / `key_file`，
     /// 否则返回 [`QuicError::Config`]。
-    pub fn server(conf: &QuicConf) -> Result<Self, Error> {
+    pub fn server<P: AsRef<Path>>(path: P) -> Result<Self, Error> {
+        let conf = QuicConf::new(path)?;
         let tls_conf = conf
             .tls
             .as_ref()
             .ok_or_else(|| config_err("server 需要 tls 配置（cert_file / key_file）"))?;
         let tls = server_tls(tls_conf)?;
-        Ok(Self(build_config(conf, tls)?))
+        Ok(Self(build_config(&conf, tls)?))
     }
 
-    /// 从通用配置构建 tquic **客户端** 配置。
+    /// 从配置文件构建 tquic **客户端** 配置。
     ///
-    /// `tls` 未配置时使用空 ALPN、禁 0-RTT 的默认客户端 TLS。
-    pub fn client(conf: &QuicConf) -> Result<Self, Error> {
+    /// 经 [`QuicConf::new`] 加载配置；`tls` 未配置时使用空 ALPN、
+    /// 禁 0-RTT 的默认客户端 TLS。
+    pub fn client<P: AsRef<Path>>(path: P) -> Result<Self, Error> {
+        let conf = QuicConf::new(path)?;
         let tls = match conf.tls.as_ref() {
             Some(tls_conf) => client_tls(tls_conf)?,
             None => TlsConfig::new_client_config(Vec::new(), false).map_err(tquic_err)?,
         };
-        Ok(Self(build_config(conf, tls)?))
-    }
-
-    /// 从配置文件加载 `QuicConf` 并构建服务器端配置
-    pub fn server_from_file<P: AsRef<Path>>(path: P) -> Result<Self, Error> {
-        Self::server(&QuicConf::new(path)?)
-    }
-
-    /// 从配置文件加载 `QuicConf` 并构建客户端配置
-    pub fn client_from_file<P: AsRef<Path>>(path: P) -> Result<Self, Error> {
-        Self::client(&QuicConf::new(path)?)
+        Ok(Self(build_config(&conf, tls)?))
     }
 
     /// 解包出 tquic 原生 [`Config`]
@@ -143,13 +148,22 @@ fn tquic_err(e: tquic::Error) -> Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
+
+    /// 生成临时配置文件
+    fn tmp_conf_path(name: &str, conf: &QuicConf) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("vauid-wrap-test-{}", std::process::id()));
+        let path = dir.join(name);
+        conf.save(&path).expect("write tmp conf");
+        path
+    }
 
     /// 服务器端配置缺少 tls 时应报错
     #[test]
     fn server_requires_tls() {
-        let conf = QuicConf::default();
+        let path = tmp_conf_path("no_tls.toml", &QuicConf::default());
         assert!(matches!(
-            QuicConfig::server(&conf),
+            QuicConfig::server(path),
             Err(Error::Quic(QuicError::Config(_)))
         ));
     }
@@ -164,14 +178,15 @@ mod tests {
             }),
             ..Default::default()
         };
-        assert!(QuicConfig::server(&conf).is_err());
+        let path = tmp_conf_path("no_cert.toml", &conf);
+        assert!(QuicConfig::server(path).is_err());
     }
 
     /// 客户端配置无需 tls 即可构建成功
     #[test]
     fn client_builds_without_tls() {
-        let conf = QuicConf::default();
-        let cfg = QuicConfig::client(&conf).expect("client config builds");
+        let path = tmp_conf_path("client_default.toml", &QuicConf::default());
+        let cfg = QuicConfig::client(path).expect("client config builds");
         // 解包出的 tquic Config 应可复用
         let _inner = cfg.into_inner();
     }
