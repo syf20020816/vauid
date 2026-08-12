@@ -1,96 +1,53 @@
 mod algorithm;
+mod quic;
+mod server;
 mod tls;
 
 pub use algorithm::CcAlgorithm;
+pub use quic::{QuicConf, QUIC_CONF_PATH};
+pub use server::*;
 pub use tls::TlsConf;
 
 use crate::Result;
-use serde::{Deserialize, Serialize};
-use std::{fs, fs::read_to_string, path::Path};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
 
 /// 默认配置目录（相对应用根目录）
 pub const QUIC_CONF_DIR: &str = "conf";
-/// 默认 Quic 配置文件路径：应用根目录下 `conf/quic.conf.toml`
-pub const QUIC_CONF_PATH: &str = "conf/quic.conf.toml";
 
-
-
-/// Quic 常规配置结构体
-/// 在应用层会为 Quic 服务器配置 Quic 相关参数，具体转换看应用层处理
-/// 这里只定义常规的 Quic 配置参数，方便转为任何 Quic 服务器的配置结构体（tquic, ant-quic, s2n-quic等）
+/// 配置读写抽象：从 TOML 加载或创建默认配置，并可序列化保存。
 ///
-/// 所有字段均有默认值（对齐 tquic 1.6 默认），配置文件仅需填写需要覆盖的项。
-#[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(default)]
-pub struct QuicConf {
-    /// 最大空闲超时时间，单位秒；0 表示禁用（默认）
-    pub max_idle_timeout: u64,
-    /// 握手超时时间，单位秒；0 表示关闭超时（默认 30）
-    pub max_handshake_timeout: u64,
-    /// 最大并发连接数（默认 1_000_000）
-    pub max_concurrent_conns: u32,
-    /// 接收 UDP 载荷大小上限，单位字节（默认 65527）
-    pub recv_udp_payload_size: u16,
-    /// 最大发送 UDP 载荷大小，单位字节（默认 1200，实际由 DPLPMTUD 探测）
-    pub send_udp_payload_size: usize,
-    /// 连接级初始流控窗口，单位字节（默认 10_485_760）
-    pub initial_max_data: u64,
-    /// 双向流本地数据流控窗口，单位字节（默认 5_242_880）
-    pub initial_max_stream_data_bidi_local: u64,
-    /// 双向流对端数据流控窗口，单位字节（默认 2_097_152）
-    pub initial_max_stream_data_bidi_remote: u64,
-    /// 单向流数据流控窗口，单位字节（默认 1_048_576）
-    pub initial_max_stream_data_uni: u64,
-    /// 最大双向流数量（默认 200）
-    pub initial_max_streams_bidi: u64,
-    /// 最大单向流数量（默认 100）
-    pub initial_max_streams_uni: u64,
-    /// 拥塞控制算法（默认 bbr）
-    pub cc_algorithm: CcAlgorithm,
-    /// TLS 配置；`None` 表示不配置 TLS（由应用层决定是否必需）
-    pub tls: Option<TlsConf>,
-}
+/// 类型需满足 `Serialize + DeserializeOwned + Default`：`Default` 提供常规默认值，
+/// `serde(default)` 保证配置文件中未填写的字段自动回落默认值。
+pub trait ConfRW
+where
+    Self: serde::Serialize + serde::de::DeserializeOwned + Sized + Default,
+{
+    /// 默认配置文件路径（相对应用根目录）
+    const DEFAULT_PATH: &str;
 
-impl Default for QuicConf {
-    fn default() -> Self {
-        Self {
-            max_idle_timeout: 0,
-            max_handshake_timeout: 30,
-            max_concurrent_conns: 1_000_000,
-            recv_udp_payload_size: 65_527,
-            send_udp_payload_size: 1_200,
-            initial_max_data: 10_485_760,
-            initial_max_stream_data_bidi_local: 5_242_880,
-            initial_max_stream_data_bidi_remote: 2_097_152,
-            initial_max_stream_data_uni: 1_048_576,
-            initial_max_streams_bidi: 200,
-            initial_max_streams_uni: 100,
-            cc_algorithm: CcAlgorithm::default(),
-            tls: None,
-        }
-    }
-}
-
-impl QuicConf {
-    /// 加载默认配置文件 `conf/quic.conf.toml`（相对应用根目录）。
+    /// 加载配置。
     ///
-    /// 文件不存在时使用默认值创建并写入，后续可直接读取。
-    pub fn load() -> Result<Self> {
-        Self::new(QUIC_CONF_PATH)
-    }
-
-    /// 加载 TOML 配置文件。
+    /// - 文件已存在且非空：读取并解析 TOML，未填写的字段使用默认值；
+    /// - 文件不存在或为空（0 字节/纯空白，如历史遗留的空文件）：
+    ///   使用默认值创建该配置文件并写入，再返回默认配置。
     ///
-    /// - 文件已存在：读取并解析，未填写的字段使用常规默认值；
-    /// - 文件不存在：使用默认值创建该配置文件并写入，再返回默认配置。
-    pub fn new<P>(path: P) -> Result<Self>
+    /// 无状态关联函数，无需先构造实例：`QuicConf::new("conf/quic.conf.toml")`。
+    fn new<P>(path: Option<P>) -> Result<Self>
     where
         P: AsRef<Path>,
     {
-        let path = path.as_ref();
+        let path = path.map_or(PathBuf::from(Self::DEFAULT_PATH), |p| {
+            p.as_ref().to_path_buf()
+        });
         if path.is_file() {
-            let content = read_to_string(path)?;
-            return Ok(toml::from_str(&content)?);
+            let content = fs::read_to_string(&path)?;
+            // 空文件按缺失处理：重新生成默认配置，避免空文件被静默读为默认值后永不修复
+            if !content.trim().is_empty() {
+                return Ok(toml::from_str(&content)?);
+            }
         }
 
         let conf = Self::default();
@@ -99,49 +56,17 @@ impl QuicConf {
     }
 
     /// 将当前配置序列化为 TOML 并写入指定路径（自动创建父目录）。
-    pub fn save<P>(&self, path: P) -> Result<()>
+    fn save<P>(&self, path: P) -> Result<()>
     where
         P: AsRef<Path>,
     {
         let path = path.as_ref();
-        if let Some(parent) = path.parent() {
+        // 纯文件名（如 "quic.conf.toml"）时 parent 为空串，跳过建目录
+        if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
             fs::create_dir_all(parent)?;
         }
         let content = toml::to_string_pretty(self)?;
         fs::write(path, content)?;
         Ok(())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// 配置文件不存在时自动创建默认 TOML，之后可直接读取
-    #[test]
-    fn new_creates_default_toml_when_missing() {
-        let dir = std::env::temp_dir().join(format!("vauid-conf-test-{}", std::process::id()));
-        let path = dir.join("quic.conf.toml");
-        let _ = fs::remove_dir_all(&dir);
-
-        // 不存在：创建默认配置文件
-        let conf = QuicConf::new(&path).expect("create default");
-        assert_eq!(conf.max_handshake_timeout, 30);
-        assert!(path.is_file());
-
-        // 已存在：直接读取，字段与默认值一致
-        let conf2 = QuicConf::new(&path).expect("reload");
-        assert_eq!(conf2.max_handshake_timeout, 30);
-        assert_eq!(conf2.cc_algorithm, CcAlgorithm::Bbr);
-        assert_eq!(conf2.tls, None);
-
-        let _ = fs::remove_dir_all(&dir);
-    }
-
-    /// 默认配置文件路径约定
-    #[test]
-    fn default_path_convention() {
-        assert_eq!(QUIC_CONF_PATH, "conf/quic.conf.toml");
-        assert_eq!(QUIC_CONF_DIR, "conf");
     }
 }

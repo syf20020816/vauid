@@ -10,7 +10,3 @@ initial_max_stream_data_uni = 1048576
 initial_max_streams_bidi = 200
 initial_max_streams_uni = 100
 cc_algorithm = "bbr"
-[tls]
-cert_file = "conf/cert/cert.crt"
-key_file = "conf/cert/cert.key"
-alpn = ["vauid"]

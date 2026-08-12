@@ -1,0 +1,1 @@
+{"timestamp":"2026-08-12T07:39:06.559542Z","level":"ERROR","message":"failed to start quic server; please fill tls.cert_file/key_file in conf/quic.conf.toml","error":"QUIC ERROR: config error: server 需要 tls 配置（cert_file / key_file）","target":"vauid"}

@@ -3,5 +3,7 @@
 //! binary (`main.rs`) 与集成测试 (`tests/`) 共用此库。
 
 pub mod core;
+/// 结构化日志模块: 全局日志初始化 + 请求链路追踪
+pub mod log;
 /// 相关服务模块: P2P服务， SFU服务
 pub mod service;

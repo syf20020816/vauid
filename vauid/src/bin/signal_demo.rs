@@ -15,15 +15,14 @@ use std::sync::Arc;
 
 use axum::{Router, routing::get};
 use tokio::net::TcpListener;
-use tracing::{error, info, level_filters::LevelFilter};
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
+use tracing::{error, info};
 
 use vauid::core::signal::server::ws_handler;
 use vauid::core::signal::AppState;
 
 #[tokio::main]
 async fn main() {
-    init_tracing();
+    vauid::log::init().expect("日志初始化失败");
 
     let listen: std::net::SocketAddr = std::env::args()
         .nth(1)
@@ -43,16 +42,4 @@ async fn main() {
     if let Err(e) = axum::serve(listener, app).await {
         error!(error = %e, "信令服务器运行出错");
     }
-}
-
-/// 初始化 tracing 日志：默认 info 级别，支持 `RUST_LOG` 环境变量覆盖
-fn init_tracing() {
-    let filter = EnvFilter::builder()
-        .with_default_directive(LevelFilter::INFO.into())
-        .from_env_lossy();
-
-    tracing_subscriber::registry()
-        .with(filter)
-        .with(tracing_subscriber::fmt::layer().compact())
-        .init();
 }

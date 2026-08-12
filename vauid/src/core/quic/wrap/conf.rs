@@ -17,7 +17,7 @@ use vauid_shared::error::{Error, QuicError};
 ///
 /// vauid 包内的业务模块统一从本包路径取用配置类型，
 /// 不直接依赖 `vauid-shared`；`QuicConfig` 负责将其转换为 tquic [`Config`]。
-pub use vauid_shared::conf::{CcAlgorithm, QuicConf, TlsConf, QUIC_CONF_PATH};
+pub use vauid_shared::conf::{CcAlgorithm, ConfRW, QuicConf, TlsConf, QUIC_CONF_PATH};
 
 /// tquic 配置包装：持有构建完成的 tquic [`Config`]。
 ///
@@ -33,7 +33,7 @@ impl QuicConfig {
     /// 要求 `QuicConf::tls` 存在且配置了 `cert_file` / `key_file`，
     /// 否则返回 [`QuicError::Config`]。
     pub fn server<P: AsRef<Path>>(path: P) -> Result<Self, Error> {
-        let conf = QuicConf::new(path)?;
+        let conf = QuicConf::new(Some(path))?;
         let tls_conf = conf
             .tls
             .as_ref()
@@ -47,7 +47,7 @@ impl QuicConfig {
     /// 经 [`QuicConf::new`] 加载配置；`tls` 未配置时使用空 ALPN、
     /// 禁 0-RTT 的默认客户端 TLS。
     pub fn client<P: AsRef<Path>>(path: P) -> Result<Self, Error> {
-        let conf = QuicConf::new(path)?;
+        let conf = QuicConf::new(Some(path))?;
         let tls = match conf.tls.as_ref() {
             Some(tls_conf) => client_tls(tls_conf)?,
             None => TlsConfig::new_client_config(Vec::new(), false).map_err(tquic_err)?,

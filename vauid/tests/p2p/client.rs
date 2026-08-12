@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use vauid::service::p2p::client::QuicClient;
 use vauid::service::p2p::P2PServer;
-use vauid_shared::conf::{QuicConf, TlsConf};
+use vauid_shared::conf::{ConfRW, QuicConf, TlsConf};
 
 /// 生成自签名证书与 quic 配置文件（写入临时目录），返回 (证书路径, 私钥路径, 配置文件路径)
 fn setup_conf() -> (PathBuf, PathBuf, PathBuf) {

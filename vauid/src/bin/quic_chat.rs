@@ -49,10 +49,10 @@ impl TransportHandler for ChatHandler {
 
     fn on_conn_established(&mut self, conn: &mut Connection) {
         let msg = self.state.borrow_mut().next_msg.take();
-        if let Some(msg) = msg {
-            if let Ok(stream_id) = conn.stream_bidi_new(0, false) {
-                let _ = conn.stream_write(stream_id, Bytes::from(msg), true);
-            }
+        if let Some(msg) = msg
+            && let Ok(stream_id) = conn.stream_bidi_new(0, false)
+        {
+            let _ = conn.stream_write(stream_id, Bytes::from(msg), true);
         }
     }
 
@@ -87,6 +87,8 @@ impl TransportHandler for ChatHandler {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    vauid::log::init().expect("日志初始化失败");
+
     let args: Vec<String> = std::env::args().collect();
     let remote: SocketAddr = args
         .get(1)

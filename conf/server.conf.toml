@@ -1,0 +1,8 @@
+addr = "127.0.0.1"
+port = 8080
+quic = "conf/quic.conf.toml"
+
+[log]
+level = "info"
+output = "log/vauid.log"
+output_enabled = false

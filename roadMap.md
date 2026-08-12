@@ -158,7 +158,7 @@ pub struct Message {
 
 | 任务 | 交付物 | 工期 | 验收 |
 | :--- | :--- | :---: | :--- |
-| 确认 D1–D6 决策并写入本文件 | 决策记录 | 0.5 | 签字 |
+| 确认 D1–D6 决策并写入本文件 | 决策记录 | 0.5 | 签字 √ |
 | `tracing` 结构化日志 + request_id | 启动 JSON 日志 | 1 | 日志可解析 |
 | `vauid-shared::error` 分类错误树（Signal/Quic/Room/Media/Config） | 错误模块 | 1.5 | From 转换单测 |
 | 协议 schema 补齐 `MsgType`/`Message` 骨架 | proto/message.rs | 2 | serde round-trip 单测 |

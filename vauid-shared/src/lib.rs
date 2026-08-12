@@ -9,5 +9,6 @@ pub mod conf;
 // signaling protocol between client and server
 pub mod proto;
 
+pub mod utils;
 
 pub type Result<T> = std::result::Result<T, Error>;
