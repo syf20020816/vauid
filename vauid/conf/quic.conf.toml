@@ -1,0 +1,4 @@
+[tls]
+cert_file = "conf/cert.pem"
+key_file = "conf/key.pem"
+alpn = ["vauid"]

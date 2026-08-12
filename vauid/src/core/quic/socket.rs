@@ -24,6 +24,10 @@ impl QuicSocket {
         let addr_map = DashMap::new();
 
         let sock = UdpSocket::bind(*local).await?;
+        // 预热：触发 IO 驱动注册并缓存可写就绪态。
+        // 否则 tquic 的同步回调（PacketSendHandler::on_packets_send -> try_send_to）
+        // 首次调用会因就绪态缓存为空直接返回 WouldBlock，导致 Initial 无法发出。
+        let _ = sock.writable().await;
         let local_addr = sock.local_addr()?;
 
         let sid = udp_sock.insert(sock);
@@ -82,7 +86,7 @@ impl QuicSocket {
         let sid = self.sock_from_map(src, Some(buf))?;
 
         match self.udp_sock.get(sid) {
-            Some(sock) => Ok(sock.try_send_to(buf, dst)?),
+            Some(sock) => sock.try_send_to(buf, dst).map_err(Into::into),
             None => Err(QuicError::SendAddrNotFound {
                 addr: src,
                 buf: Some(buf.to_vec()),

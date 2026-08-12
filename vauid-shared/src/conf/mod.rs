@@ -1,3 +1,9 @@
+mod algorithm;
+mod tls;
+
+pub use algorithm::CcAlgorithm;
+pub use tls::TlsConf;
+
 use crate::Result;
 use serde::{Deserialize, Serialize};
 use std::{fs, fs::read_to_string, path::Path};
@@ -7,54 +13,7 @@ pub const QUIC_CONF_DIR: &str = "conf";
 /// 默认 Quic 配置文件路径：应用根目录下 `conf/quic.conf.toml`
 pub const QUIC_CONF_PATH: &str = "conf/quic.conf.toml";
 
-/// 拥塞控制算法（常规化枚举，与具体 QUIC 实现解耦）
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, Default)]
-#[serde(rename_all = "lowercase")]
-pub enum CcAlgorithm {
-    /// CUBIC
-    Cubic,
-    /// BBR（默认）
-    #[default]
-    Bbr,
-    /// BBRv3（实验性）
-    Bbr3,
-    /// COPA（实验性）
-    Copa,
-    /// Dummy（测试用，静态拥塞窗口）
-    Dummy,
-}
 
-impl CcAlgorithm {
-    /// 算法名称字符串
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Cubic => "cubic",
-            Self::Bbr => "bbr",
-            Self::Bbr3 => "bbr3",
-            Self::Copa => "copa",
-            Self::Dummy => "dummy",
-        }
-    }
-}
-
-/// TLS 常规配置结构体
-/// 与具体 QUIC 实现的 TLS 配置（tquic 的 TlsConfig 等）解耦，由应用层负责转换。
-#[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
-#[serde(default)]
-pub struct TlsConf {
-    /// PEM 证书文件路径（服务器端必填）
-    pub cert_file: Option<String>,
-    /// PEM 私钥文件路径（服务器端必填）
-    pub key_file: Option<String>,
-    /// CA 证书路径（文件或目录），用于校验对端证书
-    pub ca_file: Option<String>,
-    /// ALPN 协议列表，如 `["vauid", "h3"]`
-    pub alpn: Vec<String>,
-    /// 是否启用 0-RTT 早数据
-    pub enable_early_data: bool,
-    /// 客户端是否校验对端证书
-    pub verify: bool,
-}
 
 /// Quic 常规配置结构体
 /// 在应用层会为 Quic 服务器配置 Quic 相关参数，具体转换看应用层处理

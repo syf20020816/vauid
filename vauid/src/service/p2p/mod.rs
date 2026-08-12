@@ -6,11 +6,14 @@
 //! 说明：tquic 的事件循环是同步驱动且内部使用 `Rc<RefCell<..>>`（非 `Send`），
 //! 因此 `P2PServer` 不做跨线程共享；单连接处理建议在独立任务中独占运行。
 
+pub mod client;
+
 use std::net::SocketAddr;
 use std::path::Path;
 use std::rc::Rc;
 use std::time::Instant;
 
+use bytes::Bytes;
 use tquic::{Connection, Endpoint, PacketInfo, TransportHandler};
 use vauid_shared::error::{Error, QuicError};
 
@@ -26,7 +29,6 @@ pub struct P2PServer {
     pub endpoint: Endpoint,
     /// 收发监听的Quic套接字
     pub socket: Rc<QuicSocket>,
-
     /// 接收数据缓冲区
     /// 用于存储从客户端接收的数据
     pub recv_buf: Vec<u8>,
@@ -92,8 +94,10 @@ impl P2PServer {
     }
 }
 
-/// 默认 QUIC 传输事件处理器（骨架）。
-/// 目前仅占位，业务回调（连接生命周期 / 流读写）待后续实现。
+/// 默认 QUIC 传输事件处理器。
+///
+/// 服务器只负责消息转发（当前为回显，后续接入房间/拓扑转发逻辑），
+/// 不负责任何业务逻辑。
 #[derive(Default)]
 pub struct P2PHandler;
 
@@ -106,7 +110,23 @@ impl TransportHandler for P2PHandler {
 
     fn on_stream_created(&mut self, _conn: &mut Connection, _stream_id: u64) {}
 
-    fn on_stream_readable(&mut self, _conn: &mut Connection, _stream_id: u64) {}
+    /// 流可读：把客户端数据读出并原样写回（echo 转发）。
+    fn on_stream_readable(&mut self, conn: &mut Connection, stream_id: u64) {
+        loop {
+            let mut buf = [0u8; 4096];
+            let (n, fin) = match conn.stream_read(stream_id, &mut buf) {
+                Ok(v) => v,
+                // 暂无更多数据（Done）或流已错误：结束本轮
+                Err(_) => break,
+            };
+            if n > 0 {
+                let _ = conn.stream_write(stream_id, Bytes::copy_from_slice(&buf[..n]), fin);
+            }
+            if fin {
+                break;
+            }
+        }
+    }
 
     fn on_stream_writable(&mut self, _conn: &mut Connection, _stream_id: u64) {}
 

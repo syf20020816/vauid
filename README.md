@@ -1,11 +1,11 @@
 # `vauid` 技术架构与设计文档
-**基于 Rust 的智能混合拓扑 (P2P/SFU) 与 QUIC 增强型 WebRTC 媒体服务器**
+**基于 Rust 的智能混合拓扑 (P2P/SFU) 与 QUIC 演进型实时通信服务器**
 
 ## 1. 项目概述
-`vauid` 是一个基于 Rust 构建的下一代 WebRTC 媒体与信令服务器。其核心设计理念是 **“按需拓扑，极致效率”**：
+`vauid` 是一个基于 Rust 构建的下一代实时音视频服务器。其核心设计理念是 **"按需拓扑，极致效率"**：
 1. **默认 P2P 直连**：在小型会议（≤4人）中，强制客户端建立点对点 (Mesh) 连接，媒体流完全绕过服务器，实现零服务器带宽成本与最低延迟。
 2. **智能降级 SFU**：当房间人数 > 4 时，自动触发拓扑重构，平滑切换至 SFU (Selective Forwarding Unit) 模式，由 `vauid` 接管媒体流转发，防止客户端上行带宽崩溃。
-3. **QUIC 协议探索**：突破传统 WebRTC (RTP/SCTP over UDP) 的限制，探索基于 QUIC (通过 WebTransport 或自定义隧道) 构建更可靠、抗弱网的数据通道与信令链路，解决传统 UDP 的队头阻塞和穿透难题。
+3. **QUIC 演进主线**：以 QUIC **全面替代 WebSocket 与 WebRTC/SRTP 传输**——信令与音视频媒体均由 QUIC 承载（浏览器经 WebTransport over HTTP/3，自研客户端经裸 QUIC），解决 TCP 队头阻塞、弱网抗性与连接建立延迟问题。WebRTC（str0m）作为 QUIC 未就绪期的兜底基线。详见 [roadMap.md](./roadMap.md)（最终路线，v0.2）。
 
 ---
 
@@ -15,9 +15,9 @@
 | :--- | :--- | :--- |
 | **核心语言** | **Rust** | 内存安全、无 GC 停顿、极高的并发性能，适合构建底层网络基础设施。 |
 | **异步运行时** | **Tokio** | Rust 生态最成熟的异步运行时，提供高性能的事件驱动网络 I/O。 |
-| **WebRTC 核心** | **`str0m`** (或 `webrtc-rs`) | `str0m` 是纯 Rust 实现的 WebRTC 栈，无 C/C++ 依赖 (如 libwebrtc)，API 现代化，极适合定制 SFU 逻辑。 |
-| **QUIC 核心** | **`quinn`** | 纯 Rust 实现的 QUIC 协议栈，性能优异，用于构建下一代信令/数据通道。 |
-| **信令与 API** | **`axum`** | 轻量、高性能的 Rust Web 框架，用于处理 HTTP/WebSocket 信令及 RESTful API。 |
+| **WebRTC 核心（基线）** | **`str0m`** | 纯 Rust 实现的 WebRTC 栈，作为 QUIC 未就绪期的媒体兜底与 A/B 对照；其 RTP/RTCP/编码管线可复用于 QUIC 媒体面（D6）。 |
+| **QUIC 核心（主线）** | **`tquic`** | 纯 Rust 实现的 QUIC 协议栈（当前已选型落地，含常规化配置封装）；承载信令与音视频媒体。浏览器侧经 WebTransport（RFC 9220）接入。 |
+| **信令与 API** | **`axum`**（WS 基线）+ QUIC 信令（演进） | 轻量、高性能的 Rust Web 框架；WS 信令作为过渡基线，最终由 QUIC/WebTransport 信令取代（D4）。 |
 | **状态与路由** | **`redis`** (可选) | 用于分布式部署时的房间状态同步与节点发现 (单机模式可仅用内存 `DashMap`)。 |
 | **NAT 穿透** | **`stun` / `turn`** | 内置 STUN 服务，按需 fallback 到 TURN (可对接 coturn 或自建)。 |
 
@@ -74,10 +74,10 @@ graph TD
 3. **SFU 媒体路由模块 (SFU Engine)**：
    - 当触发降级时，动态初始化 `str0m` 实例。
    - 接收所有客户端的上行流 (Uplink)，并根据每个客户端的网络状况 (Receiver Estimated Max Bitrate, REMB) 进行选择性转发 (Downlink)。
-4. **QUIC 增强模块 (Experimental)**：
-   - 尝试使用 `quinn` 建立客户端与服务器之间的 QUIC 连接。
-   - **路径 A (保守)**：用 QUIC 替代 WebSocket 做信令，用 WebTransport 替代 RTCDataChannel，提供更可靠、低延迟的数据同步（如前端虚拟布局的协同状态）。
-   - **路径 B (激进)**：探索通过 WebTransport API 传输音频/视频流，绕过传统 RTP/RTCP 的复杂拥塞控制，利用 QUIC 原生的多路复用和 0-RTT 握手。
+4. **QUIC 传输模块（演进主线）**：
+   - 基于 `tquic` 建立客户端与服务器之间的 QUIC 连接（含 DATAGRAM 扩展，RFC 9221，用于不可靠媒体传输）。
+   - **信令**：用 QUIC/WebTransport 替代 WebSocket 做信令，提供更可靠、低延迟的控制通道。
+   - **媒体**：音视频流经 QUIC Datagram/Stream 传输（RTP 语义复用，RFC `rtp-over-quic` 参考），替代 SRTP/DTLS 传输，利用 QUIC 多路复用、流优先级与 0-RTT 握手，实现弱网下更低的端到端延迟。
 
 ---
 
@@ -88,15 +88,15 @@ graph TD
 - **实现路径**：当第 6 人加入时，服务器通过信令通知前 5 人：“停止相互发送 P2P 流，改为向服务器 IP 发送单路上行流”。客户端销毁现有的 P2P `RTCPeerConnection`，重新与 `vauid` SFU 建立连接。
 - **挑战与解决**：切换瞬间会有 100-300ms 的媒体中断。可通过前端 (您的虚拟布局组件库) 的平滑过渡动画和音频淡入淡出 (Fade-in/out) 来掩盖这一过程，实现“无感切换”。
 
-### 4.2 基于 QUIC 的 WebRTC 探索可行性：**中 (前瞻性)**
-- **现状**：W3C 正在推进 **WebTransport** 标准，它基于 HTTP/3 (QUIC)。Chrome 和 Edge 已提供实验性支持。
+### 4.2 QUIC 传输替代可行性：**高（演进主线，已验证底座）**
+- **现状**：QUIC 传输底座已在 [roadMap.md](./roadMap.md) Phase 0–1 落地（tquic 封装、echo、客户端、交互工具实测通过）；W3C **WebTransport** 基于 HTTP/3 (QUIC)，Chrome/Edge 已支持。
 - **可行性**：
-  - **数据通道**：完全可行且优于 SCTP。QUIC 的多路复用没有队头阻塞，重传机制更优。
-  - **媒体流**：目前浏览器尚不支持直接通过 WebTransport 发送/接收原生 H.264/VP9 媒体流（需配合 WebCodecs API 进行软编解码）。
-- **`vauid` 的策略**：初期将 QUIC 用于**高可靠信令**和**DataChannel**（完美契合您前端组件库的布局状态同步、弱网流控指令下发）。媒体流仍保留 SRTP，但预留 WebTransport + WebCodecs 的接口，作为未来的杀手级特性。
+  - **数据通道/信令**：完全可行且优于 WS/SCTP。QUIC 多路复用无队头阻塞，0-RTT 快速重连。
+  - **媒体流**：浏览器经 WebTransport + WebCodecs 传输媒体（自研客户端经裸 QUIC）；服务端媒体面复用 RTP 语义（RFC `rtp-over-quic` 参考），编码器/Jitter Buffer 生态直接复用。
+- **`vauid` 的策略**：QUIC 承载**信令 + 音视频媒体**为演进主线；WebRTC（str0m/SRTP）作为 QUIC 未就绪期的兜底基线，达成验收后降级。详见 [roadMap.md](./roadMap.md)（决策 D1–D7）。
 
 ### 4.3 Rust 生态的可行性：**极高**
-- `str0m` 和 `quinn` 均已达到生产级别 (Production-Ready)。纯 Rust 架构避免了 Node.js (如 `mediasoup` JS wrapper) 的 GC 停顿问题，也避免了 C++ `libwebrtc` 的庞大编译体积和内存泄漏风险。单核即可轻松处理数百路 720p 媒体流转发。
+- `str0m` 与 `tquic` 均为纯 Rust 实现。纯 Rust 架构避免了 Node.js (如 `mediasoup` JS wrapper) 的 GC 停顿问题，也避免了 C++ `libwebrtc` 的庞大编译体积和内存泄漏风险。单核即可轻松处理数百路 720p 媒体流转发。
 
 ---
 
@@ -108,7 +108,7 @@ graph TD
 | **客户端上行压力** | 极高 (N-1 路编码与上传) | 极低 (仅 1 路上行) | **动态适应** (小房间无压力，大房间自动保护) |
 | **延迟** | 最低 (点对点) | 略高 (增加一跳服务器中转) | **自适应** (小房间极致低延迟，大房间保证流畅) |
 | **NAT 穿透成功率** | 依赖复杂网络，失败率高 | 高 (客户端只需连服务器) | **高** (小房间尽力 P2P，失败或人多时自动 fallback 到 SFU) |
-| **数据通道可靠性** | SCTP (存在队头阻塞) | SCTP (存在队头阻塞) | **QUIC 增强** (多路复用无阻塞，0-RTT 快速恢复) |
+| **数据通道可靠性** | SCTP (存在队头阻塞) | SCTP (存在队头阻塞) | **QUIC 传输** (多路复用无阻塞，0-RTT 快速恢复) |
 | **架构复杂度** | 低 | 中 | **高** (需实现平滑的拓扑切换逻辑，但由 Rust 保障稳定性) |
 
 ---
@@ -142,7 +142,7 @@ graph TD
 
 ---
 
-## 7. 项目优势与商业/技术价值
+## 7. Why `vauid`?
 
 1. **极致的成本效益 (Cost-Efficiency)**：
    - 对于占市场 80% 的 1v1 或 3-4 人小型会议，`vauid` 的服务器带宽成本为 **零**。只有在真正需要时（大型会议）才消耗 SFU 带宽资源。
@@ -155,21 +155,19 @@ graph TD
 
 ---
 
-## 8. 下一步研发路线图 (Roadmap)
+## 8. 最终路线与规划
 
-- **Phase 1 (MVP)**: 实现基于 `axum` + `str0m` 的基础 SFU 功能，以及 ≤4 人的纯 P2P 信令交换逻辑。
-- **Phase 2 (核心)**: 实现 P2P 到 SFU 的自动检测与平滑重协商 (Renegotiation) 逻辑。
-- **Phase 3 (前沿)**: 引入 `quinn`，实现基于 QUIC 的信令通道和 DataChannel，替换现有 WebSocket/SCTP。
-- **Phase 4 (生态)**: 提供与您的前端“虚拟布局组件库”深度绑定的 SDK，开箱即用，提供完整的端到端解决方案。
+**主线：QUIC 全面替代 WebSocket 与 WebRTC/SRTP 传输**（信令 + 音视频媒体），WebRTC（str0m）为兜底基线。详细技术决策（D1–D7）、阶段规划、里程碑与工期见 **[roadMap.md](./roadMap.md)**（唯一权威规划），任务清单见 **[TODO.md](./TODO.md)**。
 
-这份文档为您构建 `vauid` 提供了清晰的技术蓝图。如果您需要针对 `str0m` 的具体 API 调用示例，或者 QUIC 信令替换的详细代码架构，我可以进一步为您展开。
+阶段总览：
 
-
-这个 **“过继模式”（Make-Before-Break / Seamless Handover）** 的设计非常惊艳！它完美解决了 WebRTC 拓扑切换中最核心的痛点：**切换瞬间的黑屏、卡顿或音频中断**。
-
-您将其比作“四次挥手”非常贴切，这在通信工程中被称为 **“先建后拆”（Make-Before-Break）** 机制。相比于传统的“先拆后建”（Break-Before-Make），这种设计将切换的可靠性提升到了电信级（Carrier-Grade）标准，并且与您前端“虚拟布局组件库”的 DOM 复用和 Opacity 切换策略形成了**完美的端到端闭环**。
-
-为了让这个设计在 `vauid` (Rust Server) 和前端组件库中完美落地，我为您梳理了该模式的**详细状态机、关键技术挑战及解决方案**，以及前后端联动的具体实现细节。
+| 阶段 | 内容 | 周次 | 主里程碑 |
+| :--- | :--- | :--- | :--- |
+| Phase 0–1 | QUIC 传输底座（多连接/0-RTT/DATAGRAM 扩展） | W1–W6 | M1 |
+| Phase 2–3 | 消息协议 + 双通道信令 + WebTransport 浏览器通路 | W7–W13 | M2/M3 |
+| Phase 4 | **QUIC 音视频媒体承载**（音频/视频/RTP/JB/恢复） | W14–W19 | **M4**  |
+| Phase 5 | P2P 与 SFU 混合拓扑（Make-Before-Break 无感切换） | W20–W24 | M5 |
+| Phase 6 | 生产化 + WS 下线 + SDK | W25–W30 | **M6** |
 
 ---
 
@@ -185,6 +183,9 @@ graph TD
 | **Phase 4** | **Switchover (无缝切换)** | 当 Pending List 为空（或达到超时阈值），广播 `EXECUTE_SWITCH` 信令。 | **前端执行魔法**：<br>1. 克隆备用 SFU 的 `<video>` 节点。<br>2. 将其绝对定位覆盖在原 P2P `<video>` 节点上。<br>3. 原 P2P 节点 `opacity: 0`，SFU 节点 `opacity: 1` (配合 CSS transition)。<br>4. 切换 `<audio>` 源的 `setSinkId` 或直接替换 track。 |
 | **Phase 5** | **Teardown (清理)** | 广播 `P2P_END` 信令。释放 SFU 侧相关的临时状态。 | 1. 移除 P2P 的 `RTCRtpReceiver`，调用 `sender.replaceTrack(null)` 停止向 P2P 发送。<br>2. 销毁 P2P `RTCPeerConnection`，释放上行带宽。 |
 
+**“过继模式”（Make-Before-Break / Seamless Handover）** 的设计用于解决 WebRTC 拓扑切换中最核心的痛点：**切换瞬间的黑屏、卡顿或音频中断**。
+
+将其比作“四次挥手”，这在通信工程中被称为 **“先建后拆”（Make-Before-Break）** 机制。相比于传统的“先拆后建”（Break-Before-Make），这种设计将切换的可靠性提升到了电信级（Carrier-Grade）标准，并且与您前端“虚拟布局组件库”的 DOM 复用和 Opacity 切换策略形成了**完美的端到端闭环**。
 ---
 
 ### 2. 关键技术挑战与 `vauid` 的解决方案

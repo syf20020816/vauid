@@ -1,0 +1,278 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Vauid P2P 测试</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; background: #f0f2f5; color: #333; }
+  .wrap { max-width: 720px; margin: 24px auto; background: #fff; border-radius: 12px; box-shadow: 0 2px 12px rgba(0,0,0,.08); overflow: hidden; }
+  header { padding: 16px 20px; background: #2b3a55; color: #fff; }
+  header h1 { font-size: 18px; }
+  header p { font-size: 12px; opacity: .8; margin-top: 4px; }
+  .config { display: flex; gap: 8px; padding: 14px 20px; border-bottom: 1px solid #eee; flex-wrap: wrap; }
+  .config input { flex: 1; min-width: 100px; padding: 8px 10px; border: 1px solid #ddd; border-radius: 6px; font-size: 13px; }
+  .config input:focus { outline: none; border-color: #2b3a55; }
+  button { padding: 8px 16px; border: none; border-radius: 6px; background: #2b3a55; color: #fff; cursor: pointer; font-size: 13px; }
+  button:hover { opacity: .9; }
+  button.secondary { background: #6b7a99; }
+  button:disabled { opacity: .5; cursor: not-allowed; }
+  .status { display: flex; gap: 16px; padding: 10px 20px; font-size: 12px; color: #666; background: #fafbfc; border-bottom: 1px solid #eee; flex-wrap: wrap; }
+  .status b { color: #333; }
+  .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: #ccc; margin-right: 4px; vertical-align: 1px; }
+  .dot.ok { background: #2ecc71; }
+  .chat { height: 360px; overflow-y: auto; padding: 16px 20px; display: flex; flex-direction: column; gap: 8px; }
+  .msg { max-width: 70%; padding: 8px 12px; border-radius: 10px; font-size: 14px; line-height: 1.5; word-break: break-word; }
+  .msg.me { align-self: flex-end; background: #2b3a55; color: #fff; border-bottom-right-radius: 2px; }
+  .msg.peer { align-self: flex-start; background: #eef1f6; border-bottom-left-radius: 2px; }
+  .msg .who { font-size: 11px; opacity: .7; margin-bottom: 2px; }
+  .log { font-size: 12px; color: #999; text-align: center; }
+  .input-bar { display: flex; gap: 8px; padding: 12px 20px; border-top: 1px solid #eee; }
+  .input-bar input { flex: 1; padding: 9px 12px; border: 1px solid #ddd; border-radius: 6px; font-size: 14px; }
+  .input-bar input:focus { outline: none; border-color: #2b3a55; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>Vauid P2P 测试</h1>
+    <p>WebRTC 点对点连接：信令经 vauid 服务器中转，消息通过 DataChannel 直连传输</p>
+  </header>
+
+  <div class="config">
+    <input id="wsAddr" value="ws://127.0.0.1:8080/ws" placeholder="信令地址">
+    <input id="room" value="demo" placeholder="房间号" style="max-width:120px">
+    <input id="name" value="" placeholder="昵称（同一房间内需唯一）" style="max-width:180px">
+    <button id="joinBtn">加入房间</button>
+    <button id="leaveBtn" class="secondary" disabled>离开</button>
+  </div>
+
+  <div class="status">
+    <span><span class="dot" id="sigDot"></span>信令 <b id="sigState">未连接</b></span>
+    <span><span class="dot" id="peerDot"></span>对端 <b id="peerState">无</b></span>
+    <span><span class="dot" id="dcDot"></span>数据通道 <b id="dcState">未建立</b></span>
+  </div>
+
+  <div class="chat" id="chat"></div>
+
+  <div class="input-bar">
+    <input id="msgInput" placeholder="输入消息，回车发送" disabled>
+    <button id="sendBtn" disabled>发送</button>
+  </div>
+</div>
+
+<script>
+// ---------------- 状态 ----------------
+let ws = null;          // 信令 WebSocket
+let pc = null;          // RTCPeerConnection
+let dc = null;          // RTCDataChannel
+let myId = null;        // 我的客户端 ID
+let peerId = null;      // 对端客户端 ID
+
+const iceServers = [{ urls: 'stun:stun.l.google.com:19302' }];
+const $ = (id) => document.getElementById(id);
+
+// ---------------- 信令连接 ----------------
+function join() {
+  const addr = $('wsAddr').value.trim();
+  const room = $('room').value.trim();
+  const name = $('name').value.trim();
+  if (!addr || !room || !name) { addLog('请填写信令地址、房间号与昵称'); return; }
+
+  myId = name;
+  ws = new WebSocket(addr);
+  ws.onopen = () => {
+    setState('sig', true, '已连接');
+    sendSignal('join', { room, client: myId });
+  };
+  ws.onclose = () => {
+    setState('sig', false, '未连接');
+    addLog('信令连接已关闭');
+    resetPeer();
+    $('joinBtn').disabled = false;
+    $('leaveBtn').disabled = true;
+    $('msgInput').disabled = true;
+    $('sendBtn').disabled = true;
+  };
+  ws.onerror = () => addLog('信令连接错误');
+  ws.onmessage = (e) => handleEvent(JSON.parse(e.data));
+
+  $('joinBtn').disabled = true;
+  $('leaveBtn').disabled = false;
+}
+
+function leave() {
+  if (ws) ws.close();
+}
+
+// ---------------- 信令事件分发 ----------------
+function handleEvent(evt) {
+  switch (evt.type) {
+    case 'joined':
+      myId = evt.you;
+      addLog(`已加入房间，我的 ID：${myId}`);
+      if (evt.clients.length > 0) {
+        peerId = evt.clients[0];
+        addLog(`发现对端：${peerId}`);
+        maybeInitiate();
+      }
+      break;
+    case 'peer_joined':
+      addLog(`对端加入：${evt.client}`);
+      if (!peerId) { peerId = evt.client; maybeInitiate(); }
+      break;
+    case 'peer_left':
+      addLog(`对端离开：${evt.client}`);
+      if (evt.client === peerId) resetPeer();
+      break;
+    case 'offer': onOffer(evt.from, evt.sdp); break;
+    case 'answer': onAnswer(evt.from, evt.sdp); break;
+    case 'ice': onIce(evt.from, evt.candidate); break;
+  }
+}
+
+// 约定：客户端 ID 字典序小的一方主动发起 offer，避免双方同时 offer
+function maybeInitiate() {
+  if (peerId && myId && !pc && myId < peerId) initiate();
+}
+
+// ---------------- WebRTC ----------------
+function createPC() {
+  pc = new RTCPeerConnection({ iceServers });
+  pc.onicecandidate = (e) => {
+    if (e.candidate) sendSignal('ice', { candidate: e.candidate.toJSON() });
+  };
+  pc.ondatachannel = (e) => { dc = e.channel; setupChannel(); };
+  pc.onconnectionstatechange = () => {
+    addLog(`连接状态：${pc.connectionState}`);
+    if (pc.connectionState === 'connected') {
+      setState('peer', true, peerId || '已连接');
+    } else if (['disconnected', 'failed', 'closed'].includes(pc.connectionState)) {
+      resetPeer();
+    }
+  };
+}
+
+async function initiate() {
+  createPC();
+  dc = pc.createDataChannel('vauid-chat');
+  setupChannel();
+  try {
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
+    sendSignal('offer', { sdp: { type: 'offer', sdp: offer.sdp } });
+  } catch (e) { addLog('发起 offer 失败：' + e); }
+}
+
+async function onOffer(from, sdp) {
+  if (!pc) { peerId = from; createPC(); }
+  try {
+    await pc.setRemoteDescription({ type: sdp.type, sdp: sdp.sdp });
+    const answer = await pc.createAnswer();
+    await pc.setLocalDescription(answer);
+    sendSignal('answer', { sdp: { type: 'answer', sdp: answer.sdp } });
+  } catch (e) { addLog('应答 offer 失败：' + e); }
+}
+
+async function onAnswer(from, sdp) {
+  try { await pc.setRemoteDescription({ type: sdp.type, sdp: sdp.sdp }); }
+  catch (e) { addLog('设置 answer 失败：' + e); }
+}
+
+async function onIce(from, candidate) {
+  if (!pc) { peerId = from; createPC(); }
+  try { await pc.addIceCandidate(candidate); }
+  catch (e) { addLog('添加 ICE 失败：' + e); }
+}
+
+function setupChannel() {
+  dc.onopen = () => {
+    setState('dc', true, '已建立');
+    addLog('数据通道已建立，可以开始互相发送消息');
+    $('msgInput').disabled = false;
+    $('sendBtn').disabled = false;
+    $('msgInput').focus();
+  };
+  dc.onclose = () => { setState('dc', false, '未建立'); addLog('数据通道已关闭'); };
+  dc.onmessage = (e) => {
+    try { addMsg('peer', JSON.parse(e.data).text); }
+    catch (_) { addMsg('peer', e.data); }
+  };
+}
+
+function resetPeer() {
+  peerId = null;
+  if (dc) { try { dc.close(); } catch (_) {} dc = null; }
+  if (pc) { try { pc.close(); } catch (_) {} pc = null; }
+  setState('peer', false, '无');
+  setState('dc', false, '未建立');
+  $('msgInput').disabled = true;
+  $('sendBtn').disabled = true;
+}
+
+// ---------------- 发送 ----------------
+function sendMessage() {
+  const text = $('msgInput').value.trim();
+  if (!text) return;
+  if (dc && dc.readyState === 'open') {
+    dc.send(JSON.stringify({ text }));
+    addMsg('me', text);
+    $('msgInput').value = '';
+  } else {
+    addLog('数据通道尚未就绪');
+  }
+}
+
+function sendSignal(type, payload) {
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  ws.send(JSON.stringify(Object.assign({ type, to: peerId }, payload)));
+}
+
+// ---------------- UI ----------------
+function setState(kind, ok, text) {
+  const map = {
+    sig: ['sigDot', 'sigState'],
+    peer: ['peerDot', 'peerState'],
+    dc: ['dcDot', 'dcState'],
+  };
+  const [dot, state] = map[kind];
+  $(dot).className = 'dot' + (ok ? ' ok' : '');
+  $(state).textContent = text;
+}
+
+function addMsg(who, text) {
+  const chat = $('chat');
+  const div = document.createElement('div');
+  div.className = 'msg ' + (who === 'me' ? 'me' : 'peer');
+  const name = who === 'me' ? (myId || '我') : (peerId || '对端');
+  div.innerHTML = `<div class="who">${escapeHtml(name)}</div>${escapeHtml(text)}`;
+  chat.appendChild(div);
+  chat.scrollTop = chat.scrollHeight;
+}
+
+function addLog(text) {
+  const chat = $('chat');
+  const div = document.createElement('div');
+  div.className = 'log';
+  div.textContent = text;
+  chat.appendChild(div);
+  chat.scrollTop = chat.scrollHeight;
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, (c) => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+  }[c]));
+}
+
+// ---------------- 事件绑定 ----------------
+$('joinBtn').onclick = join;
+$('leaveBtn').onclick = leave;
+$('sendBtn').onclick = sendMessage;
+$('msgInput').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') sendMessage();
+});
+</script>
+</body>
+</html>
