@@ -9,10 +9,8 @@
 use std::collections::HashMap;
 
 use crate::proto::{
-    ClientId, DisconnectReason,
-    models::{
-        BackupCodecPolicy, DataTrackInfo, Encryption, PacketTrailerFeature, ParticipantTrack,
-        Track, TrackInfo, VideoLayer, VideoLayerMode, VideoQuality,
+    ClientId, DisconnectReason, models::{
+        AudioTrackFeature, BackupCodecPolicy, DataBlob, DataBlobKey, DataTrackInfo, Encryption, PacketTrailerFeature, ParticipantTrack, Track, TrackInfo, VideoLayer, VideoLayerMode, VideoQuality,
     },
 };
 
@@ -260,6 +258,80 @@ pub struct SyncState {
     pub data_subscriptions: Vec<UpdateDataSubscription>,
 }
 
+pub enum SimulateScenario {
+    SpeakerUpdate(u32),
+    /// 模拟节点故障
+    NodeFailure(bool),
+    /// 模拟迁移场景
+    Migration,
+    /// 模拟服务器离开场景
+    ServerLeave,
+    /// 模拟切换候选对协议场景
+    SwitchCandidateProtocol,
+    /// 模拟订阅带宽场景
+    SubscriberBandwidth,
+    /// 模拟恢复时断开会话场景
+    DisconnectSignalOnResume,
+    /// 在从服务器发送任何消息之前，于恢复时断开信号连接。
+    DisconnectSignalOnResumeNoMsg,
+    /// 模拟重新连接会话场景
+    LeaveRequestFullReconnect,
+}
+
+pub struct PingRequest {
+    pub timestamp: u64,
+    /// 由客户端计算的 RTT（以毫秒为单位）
+    pub rtt: u64,
+}
+
+pub struct UpdateParticipantMetadata {
+    /// 参与者 ID
+    pub pid: String,
+    /// 元数据
+    pub metadata: String,
+    /// 待更新的属性。仅更新已设置的属性
+    /// 若要删除属性，请将值设为空字符串
+    pub attributes: HashMap<String, String>,
+    /// request id
+    pub id: String,
+}
+
+pub struct UpdateLocalAudioTrack {
+    /// track id
+    pub tid: String,
+    pub features: Vec<AudioTrackFeature>,
+}
+
+pub struct UpdateLocalVideoTrack {
+    /// track id
+    pub tid: String,
+    pub height: u32,
+    pub width: u32,
+}
+
+pub struct PublishDataTrackRequest {
+    pub pub_handle: u64,
+    pub name: String,
+    pub encryption: Encryption,
+    pub packet_trailer_features: Vec<PacketTrailerFeature>,
+    pub backup_codec_policy: BackupCodecPolicy,
+}
+
+pub struct UnpublishDataTrackRequest {
+    pub pub_handle: u64,
+}
+
+pub struct StoreDataBlobRequest {
+    pub id: String,
+    pub blob: DataBlob
+}
+
+pub struct GetDataBlobRequest {
+    pub id: String,
+    pub pid: String,
+    pub key: DataBlobKey,
+}
+
 /// 客户端 → 服务端信令
 pub enum SignalRequest {
     /// Publisher 发起 Offer
@@ -288,6 +360,7 @@ pub enum SignalRequest {
     Ping(i64),
     /// 更新参与者元数据
     UpdateMetadata(UpdateParticipantMetadata),
+    /// Ping 请求
     PingReq(PingRequest),
     /// 更新音频轨道
     UpdateLocalAudioTrack(UpdateLocalAudioTrack),

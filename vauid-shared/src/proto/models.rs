@@ -194,6 +194,7 @@ pub struct TrackInfo {
     pub packet_trailer_features: Vec<PacketTrailerFeature>,
 }
 
+/// 数据轨道的帧编码类型
 pub enum DataTrackFrameEncoding {
     UnSpecified,
     ROS1,
@@ -206,6 +207,7 @@ pub enum DataTrackFrameEncoding {
     Custom(String),
 }
 
+/// 数据轨道的 schema 编码类型
 pub enum DataTrackSchemaEncoding {
     UnSpecified,
     Protobuf,
@@ -226,8 +228,21 @@ pub struct DataTrackSchemaId {
 pub struct DataTrackInfo {
     pub sid: String,
     pub name: String,
+    /// 由客户端指定的 16 位标识符，将附加到由发布者发送的数据包上。
     pub pub_handle: u64,
     pub encryption: Encryption,
+    /// 数据轨道的帧编码类型
     pub frame_encoding: Option<DataTrackFrameEncoding>,
+    /// 数据轨道的 schema ID
     pub schema: Option<DataTrackSchemaId>,
+}
+
+pub enum DataBlobKey {
+    Generic(String),
+    Schema(DataTrackSchemaId)
+}
+
+pub struct DataBlob {
+    pub data: Vec<u8>,
+    pub key: DataBlobKey
 }
