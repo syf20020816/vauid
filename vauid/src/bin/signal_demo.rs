@@ -22,7 +22,7 @@ use vauid::core::signal::AppState;
 
 #[tokio::main]
 async fn main() {
-    vauid::log::init().expect("日志初始化失败");
+    vauid::log::init(None).expect("日志初始化失败");
 
     let listen: std::net::SocketAddr = std::env::args()
         .nth(1)

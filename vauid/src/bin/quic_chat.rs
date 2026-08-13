@@ -87,7 +87,7 @@ impl TransportHandler for ChatHandler {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    vauid::log::init().expect("日志初始化失败");
+    vauid::log::init(None).expect("日志初始化失败");
 
     let args: Vec<String> = std::env::args().collect();
     let remote: SocketAddr = args

@@ -9,10 +9,17 @@
 //! - 客户端必须先发送 `join` 成功（收到 `joined`）后才能发送其他消息。
 //! - `offer` / `answer` / `ice` 的 `to` 字段指定目标客户端 ID，由服务器定向中继。
 
+
+mod room;
+mod models;
+mod rtc;
+
+
 use serde::{Deserialize, Serialize};
 
 /// 客户端 ID
 pub type ClientId = String;
+pub type ServerId = String;
 
 /// 房间 ID
 pub type RoomId = String;
@@ -112,4 +119,41 @@ pub enum ServerEvent {
         from: ClientId,
         candidate: IceCandidate,
     },
+}
+
+/// 断开连接的原因
+pub enum DisconnectReason {
+  UnknownReason,
+  /// 客户端发起了断开连接
+  ClientInitiated,
+  /// 房间内已存在相同身份的客户端，无法加入
+  DuplicateIdentity,
+  /// 服务器实例正在关闭，无法继续服务
+  ServerShutdown,
+  /// 房间内客户端被移除，无法继续服务
+  ParticipantRemoved,
+  /// 房间已被删除，无法继续服务
+  RoomDeleted,
+  /// 客户端尝试恢复会话，但服务器未意识到
+  StateMismatch,
+  /// 客户端无法完全连接
+  JoinFailure,
+  /// 服务器请求将连接迁移到其他客户端
+  Migration,
+  /// 信令 WebSocket 已意外关闭
+  SignalClose,
+  /// 房间内所有客户端已离开
+  RoomClosed,
+  /// SIP callee 未及时响应
+  UserUnavailable,
+  /// SIP callee rejected the call (busy)
+  UserRejected,
+  /// SIP protocol failure or unexpected response
+  SIPTrunkFailure,
+  /// server timed out a participant session
+  ConnectionTimeout,
+  /// media stream failure or media timeout
+  MediaFailure,
+  /// agent encountered an error
+  AgentError,
 }
