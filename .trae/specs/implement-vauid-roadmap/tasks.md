@@ -33,11 +33,11 @@
 
 ### 并行轨（与主线并行，不阻塞）
 
-- [ ] Task 0.5: DATAGRAM 扩展 spike（独立分支，RFC 9221 最小验证，硬上限 2 人日，方案见 spec T4）
-  - [ ] tquic frame 层加 `DATAGRAM`（0x30/0x31）帧编解码 + 收发路径 + `max_datagram_frame_size` 传输参数协商
-  - [ ] 最小示例往返验证
-  - [ ] 结论记录：可行（→ Task 1.4 走 D2a）/ 不可行（→ D2b 回退），更新 roadmap §8 风险矩阵
-  - 验证：Datagram 往返实测记录 + 明确结论
+- [x] Task 0.5: DATAGRAM 扩展 spike（独立分支，RFC 9221 最小验证，硬上限 2 人日，方案见 spec T4）
+  - [x] tquic frame 层加 `DATAGRAM`（0x30/0x31）帧编解码 + 收发路径 + `max_datagram_frame_size` 传输参数协商
+  - [x] 最小示例往返验证
+  - [x] 结论记录：可行（→ Task 1.4 走 D2a）/ 不可行（→ D2b 回退），更新 roadmap §8 风险矩阵
+  - 验证：Datagram 往返实测记录 + 明确结论 ✅ **可行（D2a）**：1B/64B/1200B 三种载荷 ROUND-TRIP OK（3/3 匹配）；补丁改动点与落地建议见 `spike/datagram/README.md`；roadmap §8 风险矩阵已回写（风险降为「低」）
 
 - [ ] Task 0.6: 弱网测试基线（依赖 Slice 1 完成，才有可测量对象）
   - [ ] 测量脚本：`tc netem` 5%/10% 丢包 + 200ms 延迟下互发回路延迟/吞吐

@@ -12,7 +12,7 @@
 - [x] Slice 4：转发「目标不存在」返回 `SignalError`；`Room`/`Media` 骨架就位，`From` 转换单测通过
 
 ### 并行轨
-- [ ] DATAGRAM spike 有「可行/不可行」明确结论与往返实测记录（不可行则 D2b 回退路径已记录于 roadmap §8）
+- [x] DATAGRAM spike 有「可行/不可行」明确结论与往返实测记录（不可行则 D2b 回退路径已记录于 roadmap §8）✅ 结论：可行（D2a），`spike/datagram/README.md`
 - [ ] 弱网基线脚本可复现（±10%），5%/10% 丢包下互发回路延迟/吞吐数值已记录
 
 ### 门

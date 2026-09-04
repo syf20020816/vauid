@@ -1,8 +1,8 @@
 # `vauid` 技术实现与研发周期规划（v0.2 · 融合版）
 
-> 版本：v0.2 · 2026-08-11
-> 关联文档：[README.md](./README.md)（项目愿景与架构）、[TODO.md](./TODO.md)（任务清单与工期）、[quic.roadmap.md](./quic.roadmap.md)（QUIC 专项，已归档吸收）
-> 本文件**融合**旧版 [roadMap.md](./roadMap.md)（总体规划）与 [quic.roadmap.md](./quic.roadmap.md)（QUIC 专项），确立最终技术路线；两旧文档保留备查，**本文件为唯一权威规划**。
+> 版本：v0.2 · 2026-08-11（2026-09-04 更新：DATAGRAM spike 结论回写）
+> 关联文档：[README.md](./README.md)（项目愿景与架构）、[TODO.md](./TODO.md)（任务清单与工期）
+> 本文件由旧版 roadMap.md（v0.1 总体规划）与 quic.roadmap.md（QUIC 专项）融合而来，两旧文档已删除；**本文件为唯一权威规划**。
 
 ---
 
@@ -275,7 +275,7 @@ pub struct Message {
 
 | 风险 | 概率 | 影响 | 缓解 | 触发 |
 | :--- | :--- | :--- | :--- | :--- |
-| tquic DATAGRAM 扩展受阻 | 中 | 高 | Phase 0 spike 先行；回退 D2b（纯 STREAM 策略） | W2 |
+| tquic DATAGRAM 扩展受阻 | 低 | 高 | Phase 0 spike 已验证可行（D2a 成立，[spike/datagram/README.md](./spike/datagram/README.md)）；Phase 1 落地受阻仍可回退 D2b（纯 STREAM 策略） | W2 ✅ |
 | tquic 上 WebTransport 无法打通 | 中 | 高 | 切 D5b（quinn + wtransport） | W13 |
 | 视频编码器生态不满足实时性 | 高 | 中 | 浏览器 WebCodecs；服务端 ffmpeg 绑定；D7 spike | W14 |
 | 浏览器 WebTransport 兼容性 | 高 | 中 | WS 兜底保留至 Phase 6；特性探测降级 | W11 |
@@ -298,21 +298,10 @@ pub struct Message {
 
 ---
 
-## 10. 与旧文档的对齐
+## 10. 立即行动项（Phase 0 W1）
 
-| 旧文档 | 本文件的吸收方式 |
-| :--- | :--- |
-| [roadMap.md](./roadMap.md)（v0.1） | 拓扑切换 FSM、P2P/SFU 语义、生产化/SDK 规划、测试与指标 → 吸收至 §4.3/§5（Phase 4–6） |
-| [quic.roadmap.md](./quic.roadmap.md) | QUIC 主线、决策门 D1–D5、双通路架构、媒体承载 → 吸收至 §2/§3/§5（Phase 1–4） |
-| [TODO.md](./TODO.md) | 任务分解与工期（各节点人日预估）→ 独立文件，与本文件 Phase 一一对应 |
-| [README.md](./README.md) | 愿景与架构 → 同步更新选型与路线（QUIC 主线） |
-
----
-
-## 11. 立即行动项（Phase 0 W1）
-
-- [ ] 签字确认 §3 D1–D6 决策
-- [ ] tquic DATAGRAM 扩展 spike 立项（2 人日，W2 末交付结论）
-- [ ] 落地 `vauid-shared::proto::message`（`MsgType`/`Message` 骨架）
+- [x] 签字确认 §3 D1–D6 决策
+- [x] tquic DATAGRAM 扩展 spike —— **结论：可行（D2a 成立）**，见 [spike/datagram/README.md](./spike/datagram/README.md)
+- [x] 落地 `vauid-shared::proto::message`（`MsgType`/`Message` 骨架）
 - [ ] 建立弱网测试基线（`tc netem`）
-- [ ] 多连接管理重构立项（Phase 1 首任务）
+- [x] 多连接管理重构立项（Phase 1 首任务；Phase 0 已落会话注册雏形）
