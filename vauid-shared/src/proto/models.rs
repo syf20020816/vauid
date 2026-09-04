@@ -1,3 +1,7 @@
+// 后续阶段（媒体面/拓扑）预置的类型脚手架，接线前允许未使用。
+// 命名与协议保持一致（缩写变体、PTF 前缀），不因 lint 改名。
+#![allow(dead_code, clippy::upper_case_acronyms, clippy::enum_variant_names)]
+
 /// 轨道类型
 /// - Data: 数据轨道，用于传输非音频和视频数据
 /// - Audio: 音频轨道，用于传输音频数据

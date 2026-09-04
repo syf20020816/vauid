@@ -10,7 +10,7 @@
 //! 使用方式：
 //! ```rust,no_run
 //! use vauid_shared::conf::LogConf;
-//! vauid::log::init_with_conf(&LogConf::default());
+//! vauid::log::init(Some(LogConf::default()));
 //!
 //! let span = vauid::log::request_span("handle_signal");
 //! let _guard = span.enter(); // 本 span 内所有事件自动携带 request_id 与 name
@@ -65,7 +65,9 @@ where
 /// - 文件：`output_enabled` 为 `true` 时将 JSON 逐行写入 `output` 路径；
 /// - 级别：缺省 `LogConf::level`，`RUST_LOG` 环境变量可覆盖。
 pub fn init(conf: Option<LogConf>) -> Result<()> {
-    let conf = conf.unwrap_or(LogConf::default());
+    // 惰性求值版本；clippy 此处建议 unwrap_or_default()，保留显式 default 意图
+    #[allow(clippy::unwrap_or_default)]
+    let conf = conf.unwrap_or_else(LogConf::default);
     let filter = EnvFilter::builder()
         .with_default_directive(level_filter(conf.level).into())
         .from_env_lossy();

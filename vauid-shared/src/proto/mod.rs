@@ -13,7 +13,9 @@
 mod room;
 mod models;
 mod rtc;
+pub mod message;
 
+pub use message::{Message, MsgType};
 
 use serde::{Deserialize, Serialize};
 

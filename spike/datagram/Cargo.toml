@@ -1,0 +1,6 @@
+[workspace]
+members = ["tquic", "spike"]
+resolver = "2"
+
+[profile.release]
+debug = false

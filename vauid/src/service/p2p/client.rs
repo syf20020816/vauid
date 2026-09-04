@@ -1,8 +1,10 @@
 //! QUIC 客户端（P2P 客户端测试与互通使用）。
 //!
 //! 与 [`super::P2PServer`] 对称：同一套 `QuicSocket` + tquic `Endpoint` 封装，
-//! 以客户端角色（`is_server = false`）发起连接，握手完成后自动打开双向流发送消息，
-//! 并在收到回显后结束事件循环。
+//! 以客户端角色（`is_server = false`）发起连接，握手完成后自动打开双向流，
+//! 将消息载荷包装为统一 `Message` 帧（Chat 类型）序列化后发送。
+//! 事件循环 [`QuicClient::run_until`] 支持自定义完成条件；
+//! [`QuicClient::run`] 为默认条件（单会话回显 + welcome 均到达）。
 
 use std::cell::RefCell;
 use std::net::SocketAddr;
@@ -13,6 +15,7 @@ use std::time::Instant;
 use bytes::Bytes;
 use tquic::{Connection, Endpoint, PacketInfo, TransportHandler};
 use vauid_shared::error::{Error, QuicError};
+use vauid_shared::proto::{Message, MsgType};
 
 use crate::core::quic::socket::{QuicSocket, RecvFrom};
 use crate::core::quic::wrap::conf::QuicConfig;
@@ -27,8 +30,11 @@ pub struct ClientState {
     pub stream_id: Option<u64>,
     /// 是否已发送消息
     pub sent: bool,
-    /// 收到的回显消息
+    /// 收到的回显消息（客户端发起流上的数据，存 Message 帧的原始字节，由测试解析）
     pub received: Option<Vec<u8>>,
+    /// 服务端主动下发的消息（服务端发起流上收到的数据，存原始字节，
+    /// 首条为 Chat 类型 welcome 帧，由测试解析）
+    pub server_msgs: Vec<Vec<u8>>,
 }
 
 /// P2P 客户端
@@ -48,7 +54,8 @@ impl QuicClient {
     ///
     /// - `remote`：服务器地址；
     /// - `path`：客户端配置文件路径（经 [`QuicConfig::client`] 加载）；
-    /// - `msg`：握手完成后通过双向流发送的消息。
+    /// - `msg`：握手完成后通过双向流发送的消息载荷（发送时包装为
+    ///   Chat 类型的统一 `Message` 帧再序列化写入流）。
     ///
     /// 返回后握手已发起（Initial 已发出），需调用 [`Self::run`] 驱动事件循环。
     pub async fn connect(
@@ -85,9 +92,27 @@ impl QuicClient {
         })
     }
 
-    /// 事件循环：收包 → 喂给 QUIC 栈 → 驱动连接事件；
-    /// 收到回显消息后返回。
+    /// 事件循环（默认完成条件）：收包 → 喂给 QUIC 栈 → 驱动连接事件；
+    /// 收到回显消息与服务端下发的 welcome 后返回。
+    ///
+    /// 对应服务器「单会话回显」语义（两者都会下发，确定性成立）；
+    /// 多会话时服务器不回显，请用 [`Self::run_until`] 自定义完成条件。
     pub async fn run(&mut self) -> Result<()> {
+        self.run_until(|s| s.received.is_some() && !s.server_msgs.is_empty())
+            .await
+    }
+
+    /// 运行事件循环，直到谓词 `pred` 对当前会话状态成立。
+    ///
+    /// 进入循环前先检查一次谓词（状态可能已满足）；
+    /// 此后每轮「收包 → 驱动连接事件」后再检查一次。
+    pub async fn run_until<F>(&mut self, pred: F) -> Result<()>
+    where
+        F: Fn(&ClientState) -> bool,
+    {
+        if pred(&self.state.borrow()) {
+            return Ok(());
+        }
         loop {
             let RecvFrom {
                 len, local, remote, ..
@@ -106,14 +131,15 @@ impl QuicClient {
                 .map_err(tquic_err)?;
             self.endpoint.process_connections().map_err(tquic_err)?;
 
-            if self.state.borrow().received.is_some() {
+            if pred(&self.state.borrow()) {
                 return Ok(());
             }
         }
     }
 }
 
-/// 客户端传输事件处理器：握手完成后开流发消息，收到数据时记录回显
+/// 客户端传输事件处理器：握手完成后开流发消息（统一 `Message` 帧承载），
+/// 收到数据时按流方向记录回显或服务端主动下发的消息（保留原始字节）
 struct P2PClientHandler {
     state: Rc<RefCell<ClientState>>,
     send_msg: Vec<u8>,
@@ -125,11 +151,20 @@ impl TransportHandler for P2PClientHandler {
     fn on_conn_established(&mut self, conn: &mut Connection) {
         let mut state = self.state.borrow_mut();
         state.established = true;
-        // 打开双向流并发送消息（fin 结束）
+        // 打开双向流并发送消息（fin 结束）：载荷包装为 Chat 类型 Message 帧后序列化
         if let Ok(stream_id) = conn.stream_bidi_new(0, false) {
             state.stream_id = Some(stream_id);
-            let msg = self.send_msg.clone();
-            if conn.stream_write(stream_id, Bytes::from(msg), true).is_ok() {
+            let msg = Message {
+                ty: MsgType::Chat,
+                seq: 0,
+                flags: 0,
+                payload: self.send_msg.clone(),
+            };
+            let bytes = match serde_json::to_vec(&msg) {
+                Ok(v) => v,
+                Err(_) => return,
+            };
+            if conn.stream_write(stream_id, Bytes::from(bytes), true).is_ok() {
                 state.sent = true;
             }
         }
@@ -139,7 +174,8 @@ impl TransportHandler for P2PClientHandler {
 
     fn on_stream_created(&mut self, _conn: &mut Connection, _stream_id: u64) {}
 
-    /// 流可读：读出全部数据记录到 [`ClientState::received`]
+    /// 流可读：按流方向路由——服务端发起流（id 低 2 位为 1）的数据记入
+    /// [`ClientState::server_msgs`]，客户端发起流（回显）记入 [`ClientState::received`]
     fn on_stream_readable(&mut self, conn: &mut Connection, stream_id: u64) {
         let mut state = self.state.borrow_mut();
         let mut data = Vec::new();
@@ -157,7 +193,14 @@ impl TransportHandler for P2PClientHandler {
                 break;
             }
         }
-        if !data.is_empty() {
+        if data.is_empty() {
+            return;
+        }
+        if stream_id & 3 == 1 {
+            // 服务端发起的双向流：服务端主动下发的消息
+            state.server_msgs.push(data);
+        } else {
+            // 客户端发起的双向流：回显消息
             state.received = Some(data);
         }
     }

@@ -1,3 +1,7 @@
+// 后续阶段（媒体面/拓扑）预置的类型脚手架，接线前允许未使用。
+// SignalRequest 变体暂不装箱、文档换行保持原样，避免改动类型定义。
+#![allow(dead_code, clippy::large_enum_variant, clippy::doc_lazy_continuation)]
+
 //! RTC 协议相关结构体
 //! 包含了 RTC 协议中使用的结构体，如会话描述、ICE Candidate 等
 //! 参考了Livekit定义，但在此基础上进行了修改和优化
@@ -59,7 +63,7 @@ pub enum SignalTarget {
 
 /// # 添加新轨道请求
 /// ## 发布标准摄像头轨道
-/// ```
+/// ```text
 /// cid: "my-camera-1"
 /// name: "camera"
 /// type: VIDEO
@@ -70,7 +74,7 @@ pub enum SignalTarget {
 /// stream: "main-stream"
 /// ```
 /// ## 发布 Simulcast 轨道（多层级编码）
-/// ```
+/// ```text
 /// cid: "my-camera-2"
 /// type: VIDEO
 /// simulcast_codecs: [

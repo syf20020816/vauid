@@ -1,0 +1,13 @@
+[package]
+name = "spike"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tquic = { path = "../tquic" }
+rcgen = "0.13.2"
+bytes = "1"
+
+[[bin]]
+name = "spike"
+path = "src/main.rs"
