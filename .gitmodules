@@ -1,0 +1,3 @@
+[submodule "tquic-vauid"]
+	path = tquic-vauid
+	url = https://github.com/syf20020816/tquic-vauid/tree/feature/unreliable_datagram

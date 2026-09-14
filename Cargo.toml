@@ -1,7 +1,7 @@
 [workspace]
 members=[
     "vauid", # vauid server
-    "vauid-shared"
+    "vauid-shared",
 ]
 resolver = "3"
 

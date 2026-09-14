@@ -4,7 +4,8 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-tquic = { path = "../tquic" }
+# 独立维护的 tquic fork（含 DATAGRAM/RFC 9221 补丁），见根目录 tquic-vauid/
+tquic = { path = "../../../tquic-vauid", package = "tquic-vauid" }
 rcgen = "0.13.2"
 bytes = "1"
 
