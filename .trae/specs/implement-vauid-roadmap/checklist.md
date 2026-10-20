@@ -13,10 +13,10 @@
 
 ### 并行轨
 - [x] DATAGRAM spike 有「可行/不可行」明确结论与往返实测记录（不可行则 D2b 回退路径已记录于 roadmap §8）✅ 结论：可行（D2a），`spike/datagram/README.md`
-- [ ] 弱网基线脚本可复现（±10%），5%/10% 丢包下互发回路延迟/吞吐数值已记录
+- [x] 弱网基线脚本可复现（±10%），5%/10% 丢包下互发回路延迟/吞吐数值已记录 ✅ `scripts/netem_baseline.sh` + `docs/baseline_20261020_144425.log`；弱网两遍偏差 4–5%；macOS 用应用层注入（dummynet 对回环不生效），附带修复事件循环定时器饥饿生产级 bug（详见 tasks.md Task 0.6）
 
 ### 门
-- [ ] `cargo build && cargo clippy -D warnings && cargo test` 全绿（含全部切片回归）
+- [x] `cargo build && cargo clippy -D warnings && cargo test` 全绿（含全部切片回归）✅ 2026-10-20：14 测试通过、clippy 0 警告
 
 ## Phase 1 · QUIC 传输底座（M1）
 

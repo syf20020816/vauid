@@ -114,21 +114,28 @@ impl QuicClient {
             return Ok(());
         }
         loop {
-            let RecvFrom {
-                len, local, remote, ..
-            } = self
-                .socket
-                .recv_from(&mut self.recv_buf, self.socket.local_addr)
-                .await?;
-
-            let info = PacketInfo {
-                src: remote,
-                dst: local,
-                time: Instant::now(),
-            };
-            self.endpoint
-                .recv(&mut self.recv_buf[..len], &info)
-                .map_err(tquic_err)?;
+            // 竞速：下一个包到达 vs QUIC 定时器到期（丢失检测/PTO 依赖定时器，
+            // 只等包会在丢包 + 静默期造成定时器饥饿死锁）
+            let next_timer = self.endpoint.timeout();
+            let timer_fired = super::timer_wait(next_timer);
+            tokio::select! {
+                res = self
+                    .socket
+                    .recv_from(&mut self.recv_buf, self.socket.local_addr) =>
+                {
+                    let RecvFrom { len, local, remote, .. } = res?;
+                    let info = PacketInfo {
+                        src: remote,
+                        dst: local,
+                        time: Instant::now(),
+                    };
+                    self.endpoint
+                        .recv(&mut self.recv_buf[..len], &info)
+                        .map_err(tquic_err)?;
+                }
+                _ = timer_fired => {}
+            }
+            self.endpoint.on_timeout(Instant::now());
             self.endpoint.process_connections().map_err(tquic_err)?;
 
             if pred(&self.state.borrow()) {

@@ -39,15 +39,26 @@
   - [x] 结论记录：可行（→ Task 1.4 走 D2a）/ 不可行（→ D2b 回退），更新 roadmap §8 风险矩阵
   - 验证：Datagram 往返实测记录 + 明确结论 ✅ **可行（D2a）**：1B/64B/1200B 三种载荷 ROUND-TRIP OK（3/3 匹配）；补丁改动点与落地建议见 `spike/datagram/README.md`；roadmap §8 风险矩阵已回写（风险降为「低」）
 
-- [ ] Task 0.6: 弱网测试基线（依赖 Slice 1 完成，才有可测量对象）
-  - [ ] 测量脚本：`tc netem` 5%/10% 丢包 + 200ms 延迟下互发回路延迟/吞吐
-  - [ ] 记录基线数值（Phase 2 验收「QUIC 信令延迟 < WS 60%」对照组）
-  - 验证：脚本重跑数值可复现（±10%）
+- [x] Task 0.6: 弱网测试基线（依赖 Slice 1 完成，才有可测量对象）✅ 2026-10-20 完成
+  - [x] 测量脚本：`scripts/netem_baseline.sh` + [p2p_bench.rs](../../../vauid/examples/p2p_bench.rs) 严格请求-响应测量（--rounds/--payload/--loss/--delay）
+  - [x] 修复服务端分帧 bug（`service/p2p/mod.rs`）：帧跨多 QUIC 包分片到达时首次解析失败被丢弃 → 按流缓冲至 fin 整帧解析
+  - [x] 修复事件循环定时器饥饿死锁（**生产级 bug**，Task 0.6 最大收获）：丢包后重传依赖 PTO 定时器，但循环「只等包」导致空闲期定时器永不执行——服务端 `run` 还**漏调 `on_timeout`**（keep-alive/丢包恢复完全失效）。修复：recv 与 `endpoint.timeout()` select 竞速（server run / client run_until / bench 三处）
+  - [x] macOS 弱网注入：本机 dummynet/pf 对回环路径不生效（含绑 en0 IP，内核仍走 lo0 路由）→ 改为应用层注入：`QuicSocket::recv_from` 按包丢弃 + 延迟重注入队列（`ChaosConfig`，免 sudo、可复现，沉淀为后续弱网 CI 资产）
+  - [x] 基线数值已记录（`docs/baseline_20261020_144425.log`，100 轮 × payload 1024B，两遍复现）：
 
-- [ ] Task 0.7: Phase 0 验收门
-  - [ ] `cargo build && cargo clippy -D warnings && cargo test` 全绿
-  - [ ] 所有切片测试保持绿色（回归确认）
-  - [ ] checklist.md Phase 0 段全部勾选
+    | 场景 | rtt_avg | rtt_p50 | rtt_p95 | 握手 | 吞吐(payload) | 两遍偏差 |
+    |---|---|---|---|---|---|---|
+    | baseline | 0.16–0.20ms | 0.15–0.21ms | 0.23–0.28ms | 0.84–0.88ms | 5.1–6.2 MB/s | μs 级抖动 |
+    | loss5_delay200 | 526–553ms | ~403ms | ~860ms | ~405ms | ~1.9 KB/s | **5.1%** ✅ |
+    | loss10_delay200 | 796–829ms | 429–806ms* | 1.71–1.80s | ~406ms | ~1.2–1.3 KB/s | **4.1%** ✅ |
+
+    *p50 双峰：单轮回传 ~12 数据报 × 10% 丢包 → 每轮 ~71% 概率触发重传，回传被 PTO 拉长至 ~800ms 或免于重传 ~430ms
+  - 验证：弱网场景两遍偏差 4–5%（±10% 达标）✅；握手 ≈ 2×RTT+ε 与注入值自洽 ✅
+
+- [x] Task 0.7: Phase 0 验收门 ✅ 2026-10-20 通过
+  - [x] `cargo build && cargo clippy -D warnings && cargo test` 全绿（9 个 target 的 test result: ok，14 测试，clippy 0 警告）
+  - [x] 所有切片测试保持绿色（回归确认）
+  - [x] checklist.md Phase 0 段全部勾选
 
 ## Phase 1 · QUIC 传输底座补全（W3–W6）
 

@@ -17,7 +17,7 @@ use std::collections::{HashMap, VecDeque};
 use std::net::SocketAddr;
 use std::path::Path;
 use std::rc::Rc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use tquic::{Connection, Endpoint, PacketInfo, TransportHandler};
@@ -34,6 +34,10 @@ struct SessionState {
     downstream: u64,
     /// 待转发到该会话的出站消息队列
     outbox: VecDeque<Bytes>,
+    /// 客户端上行流的分帧缓冲：流 id -> 已累计字节。
+    /// 帧可能跨多个 QUIC 包分片到达（一次 `on_stream_readable` 不一定收全），
+    /// fin 到达前缓冲，fin 后整帧解析。
+    recv_bufs: HashMap<u64, Vec<u8>>,
 }
 
 /// 会话注册表：endpoint 连接索引 -> 会话状态
@@ -92,26 +96,33 @@ impl P2PServer {
     /// 冲洗各会话的出站队列（转发消息经下行流下发）。
     pub async fn run(&mut self) -> Result<()> {
         loop {
-            // 1. 从本地 UDP socket 接收一个数据包
-            let RecvFrom {
-                len, local, remote, ..
-            } = self
-                .socket
-                .recv_from(&mut self.recv_buf, self.socket.local_addr)
-                .await?;
+            // 1. 竞速：下一个包到达 vs QUIC 定时器到期。
+            //    只等包会造成定时器饥饿：丢包后对端等重传，而重传依赖
+            //    PTO 定时器；空闲期 keep-alive 同理永远发不出去。
+            let next_timer = self.endpoint.timeout();
+            let timer_fired = timer_wait(next_timer);
+            tokio::select! {
+                res = self
+                    .socket
+                    .recv_from(&mut self.recv_buf, self.socket.local_addr) =>
+                {
+                    let RecvFrom { len, local, remote, .. } = res?;
+                    // 2. 喂给 QUIC 协议栈（解析 + 解密 + 分发到对应连接）
+                    let info = PacketInfo {
+                        src: remote,
+                        dst: local,
+                        time: Instant::now(),
+                    };
+                    self.endpoint
+                        .recv(&mut self.recv_buf[..len], &info)
+                        .map_err(tquic_err)?;
+                }
+                _ = timer_fired => {}
+            }
 
-            // 2. 喂给 QUIC 协议栈（解析 + 解密 + 分发到对应连接）
-            let info = PacketInfo {
-                src: remote,
-                dst: local,
-                time: Instant::now(),
-            };
-            self.endpoint
-                .recv(&mut self.recv_buf[..len], &info)
-                .map_err(tquic_err)?;
-
-            // 3. 驱动所有连接的状态推进（握手、确认、流事件回调等；
+            // 3. 驱动所有连接的状态推进（超时检测、握手、确认、流事件回调等；
             //    回调可能向其他会话的出站队列投递转发消息）
+            self.endpoint.on_timeout(Instant::now());
             self.endpoint.process_connections().map_err(tquic_err)?;
 
             // 4. 冲洗出站队列；有写入则再驱动一次连接发包
@@ -228,6 +239,7 @@ impl TransportHandler for P2PHandler {
             SessionState {
                 downstream,
                 outbox: VecDeque::new(),
+                recv_bufs: HashMap::new(),
             },
         );
     }
@@ -244,7 +256,10 @@ impl TransportHandler for P2PHandler {
 
     /// 流可读：读取客户端消息（统一 `Message` 帧）。
     ///
-    /// - 多会话：把原始字节投递到除本连接外所有会话的出站队列，
+    /// 帧可能跨多个 QUIC 包分片到达（一次回调不保证收全），因此按流缓冲，
+    /// fin 到达后整帧解析。客户端上行流以 fin 结尾（每流一帧）。
+    ///
+    /// - 多会话：把完整帧投递到除本连接外所有会话的出站队列，
     ///   由 [`P2PServer::run`] 冲洗后经各自下行流转发；
     /// - 无其他会话：原样写回流（回显，兼容既有行为）。
     fn on_stream_readable(&mut self, conn: &mut Connection, stream_id: u64) {
@@ -281,11 +296,31 @@ impl TransportHandler for P2PHandler {
         if data.is_empty() {
             return;
         }
+
+        // 分帧缓冲：fin 到达前累计，fin 后取走整帧并清理该流缓冲
+        let frame = {
+            let mut registry = self.registry.borrow_mut();
+            let Some(session) = registry.get_mut(&idx) else {
+                // 连接建立时已注册，正常不应发生
+                tracing::warn!(stream_id, index = idx, "读取客户端流时会话未注册，忽略");
+                return;
+            };
+            let buf = session.recv_bufs.entry(stream_id).or_default();
+            buf.extend_from_slice(&data);
+            if !fin {
+                tracing::debug!(stream_id, buffered = buf.len(), "上行帧未收全，继续缓冲");
+                return;
+            }
+            let frame = std::mem::take(buf);
+            session.recv_bufs.remove(&stream_id);
+            frame
+        };
+
         // 校验为合法 Message 帧：解析失败经 From<serde_json::Error> 归入
         // Error::Serde 类别（错误树 Slice 4 接入），按类别归因后丢弃
-        if let Err(err) = serde_json::from_slice::<Message>(&data) {
+        if let Err(err) = serde_json::from_slice::<Message>(&frame) {
             let e: Error = err.into();
-            tracing::warn!(stream_id, len = data.len(), error = %e, "非法 Message 帧，丢弃");
+            tracing::warn!(stream_id, len = frame.len(), error = %e, "非法 Message 帧，丢弃");
             return;
         }
 
@@ -298,12 +333,12 @@ impl TransportHandler for P2PHandler {
                     continue;
                 }
                 has_other = true;
-                session.outbox.push_back(Bytes::copy_from_slice(&data));
+                session.outbox.push_back(Bytes::copy_from_slice(&frame));
             }
         }
         if !has_other {
-            // 回显：原样写回（透传读到的 fin）
-            let _ = conn.stream_write(stream_id, Bytes::from(data), fin);
+            // 回显：原样写回（每流一帧，fin 结尾）
+            let _ = conn.stream_write(stream_id, Bytes::from(frame), true);
         }
     }
 
@@ -312,6 +347,15 @@ impl TransportHandler for P2PHandler {
     fn on_stream_closed(&mut self, _conn: &mut Connection, _stream_id: u64) {}
 
     fn on_new_token(&mut self, _conn: &mut Connection, _token: Vec<u8>) {}
+}
+
+/// QUIC 定时器等待 future：`Some(d)` 睡到到期；`None` 永不完成
+/// （仅等新包；select 分支表达式无条件求值，不能在此 unwrap）
+pub(super) async fn timer_wait(next: Option<Duration>) {
+    match next {
+        Some(d) => tokio::time::sleep(d).await,
+        None => std::future::pending().await,
+    }
 }
 
 /// tquic 原生错误 → 项目统一错误

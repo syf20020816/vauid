@@ -28,7 +28,7 @@ use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use tquic::{Connection, Endpoint, PacketInfo, TransportHandler};
-use vauid::core::quic::socket::{QuicSocket, RecvFrom};
+use vauid::core::quic::socket::{set_chaos, ChaosConfig, QuicSocket, RecvFrom};
 use vauid::core::quic::wrap::conf::QuicConfig;
 use vauid::service::p2p::P2PServer;
 use vauid_shared::conf::{ConfRW, QuicConf, TlsConf};
@@ -49,15 +49,24 @@ struct Args {
     rounds: usize,
     /// 每轮载荷字节数
     payload: usize,
+    /// 服务端绑定 IP
+    bind: IpAddr,
+    /// 丢包率（百分比，0-100，应用层收包路径注入）
+    loss: f64,
+    /// 单向延迟毫秒数（应用层收包路径注入，双端生效 → RTT 约增加 2 倍）
+    delay_ms: u64,
 }
 
 fn usage() {
     println!(
-        "用法: p2p_bench [--rounds N] [--payload N]\n\
+        "用法: p2p_bench [--rounds N] [--payload N] [--bind IP] [--loss PCT] [--delay MS]\n\
          \n\
          选项:\n\
            --rounds N    测量轮数（默认 100）\n\
            --payload N   每轮载荷字节数（默认 1024，上限 {MAX_PAYLOAD}）\n\
+           --bind IP     服务端绑定 IP（默认 127.0.0.1）\n\
+           --loss PCT    丢包率百分比（应用层收包路径注入，默认 0）\n\
+           --delay MS    单向延迟毫秒（双端收包路径注入，RTT 约增加 2 倍，默认 0）\n\
            -h, --help    显示本帮助"
     );
 }
@@ -67,6 +76,9 @@ fn parse_args() -> Result<Args, String> {
     let mut args = Args {
         rounds: 100,
         payload: 1024,
+        bind: IpAddr::V4(Ipv4Addr::LOCALHOST),
+        loss: 0.0,
+        delay_ms: 0,
     };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
@@ -79,20 +91,43 @@ fn parse_args() -> Result<Args, String> {
                 usage();
                 std::process::exit(0);
             }
-            "--rounds" | "--payload" => {
+            "--rounds" | "--payload" | "--bind" | "--loss" | "--delay" => {
                 let val = match inline_val {
                     Some(v) => v,
                     None => it
                         .next()
                         .ok_or_else(|| format!("{key} 需要一个参数"))?,
                 };
-                let v: usize = val
-                    .parse()
-                    .map_err(|_| format!("{key} 需要非负整数，得到 {val:?}"))?;
-                if key == "--rounds" {
-                    args.rounds = v;
-                } else {
-                    args.payload = v;
+                match key.as_str() {
+                    "--bind" => {
+                        args.bind = val
+                            .parse()
+                            .map_err(|_| format!("{key} 需要合法 IP 地址，得到 {val:?}"))?;
+                    }
+                    "--loss" => {
+                        let v: f64 = val
+                            .parse()
+                            .map_err(|_| format!("{key} 需要小数百分比，得到 {val:?}"))?;
+                        if !(0.0..=100.0).contains(&v) {
+                            return Err(format!("{key} 需在 0-100 之间，得到 {v}"));
+                        }
+                        args.loss = v;
+                    }
+                    "--delay" => {
+                        args.delay_ms = val
+                            .parse()
+                            .map_err(|_| format!("{key} 需要非负整数毫秒，得到 {val:?}"))?;
+                    }
+                    _ => {
+                        let v: usize = val
+                            .parse()
+                            .map_err(|_| format!("{key} 需要非负整数，得到 {val:?}"))?;
+                        if key == "--rounds" {
+                            args.rounds = v;
+                        } else {
+                            args.payload = v;
+                        }
+                    }
                 }
             }
             other => return Err(format!("未知参数: {other}（试试 --help）")),
@@ -394,7 +429,8 @@ async fn bench_once(
         .process_connections()
         .map_err(|e| format!("驱动连接失败: {e}"))?;
 
-    // 事件循环：收包 → 喂给 QUIC 栈 → 驱动连接事件，直至全部轮次完成
+    // 事件循环：收包/定时器到期 → 喂给 QUIC 栈 → 驱动连接事件，直至全部轮次完成
+    // （丢包恢复依赖 PTO 定时器：只等包会定时器饥饿，丢包后死锁）
     let mut recv_buf = vec![0u8; 64 * 1024];
     loop {
         {
@@ -406,18 +442,29 @@ async fn bench_once(
                 break;
             }
         }
-        let RecvFrom { len, local, remote, .. } = socket
-            .recv_from(&mut recv_buf, socket.local_addr)
-            .await
-            .map_err(|e| format!("接收失败: {e}"))?;
-        let info = PacketInfo {
-            src: remote,
-            dst: local,
-            time: Instant::now(),
+        let next_timer = endpoint.timeout();
+        let timer_fired = async {
+            match next_timer {
+                Some(d) => tokio::time::sleep(d).await,
+                None => std::future::pending().await,
+            }
         };
-        endpoint
-            .recv(&mut recv_buf[..len], &info)
-            .map_err(|e| format!("QUIC 接收失败: {e}"))?;
+        tokio::select! {
+            res = socket.recv_from(&mut recv_buf, socket.local_addr) => {
+                let RecvFrom { len, local, remote, .. } =
+                    res.map_err(|e| format!("接收失败: {e}"))?;
+                let info = PacketInfo {
+                    src: remote,
+                    dst: local,
+                    time: Instant::now(),
+                };
+                endpoint
+                    .recv(&mut recv_buf[..len], &info)
+                    .map_err(|e| format!("QUIC 接收失败: {e}"))?;
+            }
+            _ = timer_fired => {}
+        }
+        endpoint.on_timeout(Instant::now());
         endpoint
             .process_connections()
             .map_err(|e| format!("QUIC 处理失败: {e}"))?;
@@ -545,19 +592,32 @@ fn main() {
             std::process::exit(2);
         }
     };
+
+    // 弱网注入（须在端点启动前设置）：双端同进程共享，作用于收包路径
+    if args.loss > 0.0 || args.delay_ms > 0 {
+        set_chaos(ChaosConfig {
+            loss_rate: args.loss / 100.0,
+            delay: Duration::from_millis(args.delay_ms),
+        });
+        println!(
+            "[chaos] loss={}% delay={}ms（双端收包路径单向注入，RTT 约增加 2 倍延迟）",
+            args.loss, args.delay_ms
+        );
+    }
     let conf_path = setup_conf();
 
     // 服务器线程：绑定随机端口后上报地址（或错误），随后进入事件循环。
     // 与集成测试一致：服务器线程随进程退出回收（main 返回即退出）。
     let (addr_tx, addr_rx) = mpsc::channel();
     let srv_conf = conf_path.clone();
+    let bind_ip = args.bind;
     std::thread::spawn(move || {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .expect("build server runtime");
         rt.block_on(async move {
-            let listen: SocketAddr = "127.0.0.1:0".parse().unwrap();
+            let listen = SocketAddr::new(bind_ip, 0);
             match P2PServer::bind_with_conf(listen, &srv_conf).await {
                 Ok(mut server) => {
                     let _ = addr_tx.send(Ok(server.socket.local_addr));

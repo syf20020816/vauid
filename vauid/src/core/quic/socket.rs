@@ -1,4 +1,9 @@
+use std::collections::BinaryHeap;
+use std::cmp::Reverse;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::core::Result;
 use dashmap::DashMap;
@@ -6,6 +11,56 @@ use slab::Slab;
 use tokio::net::UdpSocket;
 use tquic::{PacketInfo, PacketSendHandler};
 use vauid_shared::error::{Error, QuicError};
+
+// ---------------------------------------------------------------- 弱网注入 --
+
+/// 弱网注入配置（Task 0.6 基线用；仅作用于收包路径，等价单向网络损伤）。
+///
+/// 延迟通过「到达暂存 + 到期重注入」实现：包到达后按交付时刻入队，
+/// `recv_from` 按期弹出，突发包不会被串行 sleep 拉长。
+#[derive(Clone, Copy, Debug)]
+pub struct ChaosConfig {
+    /// 丢包率，范围 [0, 1)
+    pub loss_rate: f64,
+    /// 单向延迟（收包路径；双端同进程共享配置时 RTT 增加约 2 倍）
+    pub delay: Duration,
+}
+
+static CHAOS: OnceLock<ChaosConfig> = OnceLock::new();
+
+/// 设置进程级弱网注入（须在端点启动前调用；双端同进程共享）
+pub fn set_chaos(cfg: ChaosConfig) {
+    let _ = CHAOS.set(cfg);
+}
+
+fn chaos_current() -> Option<ChaosConfig> {
+    CHAOS.get().copied()
+}
+
+/// 轻量 xorshift64* 伪随机（非加密安全，仅测试注入用）
+fn fast_random() -> f64 {
+    static STATE: AtomicU64 = AtomicU64::new(0);
+    let mut s = STATE.load(Ordering::Relaxed);
+    if s == 0 {
+        s = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64 | 1)
+            .unwrap_or(0x9E37_79B9_7F4A_7C15);
+    }
+    s ^= s >> 12;
+    s ^= s << 25;
+    s ^= s >> 27;
+    STATE.store(s, Ordering::Relaxed);
+    (s.wrapping_mul(0x2545_F491_4F6C_DD1D) >> 11) as f64 / (1u64 << 53) as f64
+}
+
+/// 延迟重注入队列条目：(交付时刻, 序号, 数据, 远端地址)
+type DelayedEntry = (Instant, u64, Vec<u8>, SocketAddr);
+
+fn next_seq() -> u64 {
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    SEQ.fetch_add(1, Ordering::Relaxed)
+}
 
 /// 用于 QUIC 的 UDP 套接字封装
 /// 基于tokio的UdpSocket
@@ -16,6 +71,8 @@ pub struct QuicSocket {
     pub addr_map: DashMap<SocketAddr, usize>,
     /// 初始化socket绑定的本地地址
     pub local_addr: SocketAddr,
+    /// 弱网延迟重注入队列（min-heap，按交付时刻排序）
+    delay_q: Mutex<BinaryHeap<Reverse<DelayedEntry>>>,
 }
 
 impl QuicSocket {
@@ -39,6 +96,7 @@ impl QuicSocket {
             udp_sock,
             addr_map,
             local_addr,
+            delay_q: Mutex::new(BinaryHeap::new()),
         })
     }
 
@@ -97,6 +155,8 @@ impl QuicSocket {
 
     /// 从指定地址接收数据
     /// 返回接收数据的长度、本地地址、远程地址
+    ///
+    /// 弱网注入启用时：丢包按概率吞掉；延迟包按交付时刻暂存到期重注入
     pub async fn recv_from(&self, buf: &mut [u8], src: SocketAddr) -> Result<RecvFrom> {
         let sid = self.sock_from_map(src, Some(buf))?;
 
@@ -111,14 +171,76 @@ impl QuicSocket {
             }
         };
 
-        match socket.recv_from(buf).await {
-            Ok((len, remote)) => Ok(RecvFrom {
-                len,
-                local: self.local_addr,
-                remote,
-            }),
-            Err(e) => Err(Error::IO(e)),
+        loop {
+            // 1. 先交付延迟队列中到期包（可能多个突发包同时到期，逐次弹出）
+            if let Some(entry) = self.pop_due() {
+                let (_, _, data, remote) = entry;
+                let n = data.len().min(buf.len());
+                buf[..n].copy_from_slice(&data[..n]);
+                return Ok(RecvFrom {
+                    len: data.len(),
+                    local: self.local_addr,
+                    remote,
+                });
+            }
+
+            let chaos = chaos_current();
+            let next_due = self.next_due();
+
+            // 2. 新到包与「等到期」竞速：注入延迟时包先入队，由下一轮循环交付。
+            //    注意 tokio::select! 的分支表达式无条件求值，队列空时用
+            //    pending() 兜底（永不完成），不能用 precondition + unwrap。
+            let due_wait = async {
+                match next_due {
+                    Some(due) => tokio::time::sleep_until(tokio::time::Instant::from_std(due)).await,
+                    None => std::future::pending::<()>().await,
+                }
+            };
+            tokio::select! {
+                res = socket.recv_from(buf) => {
+                    let (len, remote) = res.map_err(Error::IO)?;
+                    match chaos {
+                        Some(c) if c.loss_rate > 0.0 && fast_random() < c.loss_rate => {
+                            continue; // 丢包：吞掉继续收
+                        }
+                        Some(c) if !c.delay.is_zero() => {
+                            let data = buf[..len].to_vec();
+                            let mut q = self.delay_q.lock().unwrap();
+                            q.push(Reverse((Instant::now() + c.delay, next_seq(), data, remote)));
+                            continue;
+                        }
+                        _ => {
+                            // 数据已由 recv_from 写入 buf，直接返回
+                            return Ok(RecvFrom {
+                                len,
+                                local: self.local_addr,
+                                remote,
+                            });
+                        }
+                    }
+                }
+                // 到期后循环头部负责弹出
+                _ = due_wait => {
+                    continue;
+                }
+            }
         }
+    }
+
+    /// 最近一个待交付包的到期时刻
+    fn next_due(&self) -> Option<Instant> {
+        self.delay_q.lock().unwrap().peek().map(|Reverse(e)| e.0)
+    }
+
+    /// 弹出一个已到期包（无到期包返回 None）
+    fn pop_due(&self) -> Option<DelayedEntry> {
+        let mut q = self.delay_q.lock().unwrap();
+        if let Some(Reverse(e)) = q.peek()
+            && e.0 <= Instant::now()
+        {
+            return q.pop().map(|Reverse(e)| e);
+        }
+        None
     }
 }
 
